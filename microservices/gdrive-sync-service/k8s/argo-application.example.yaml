@@ -1,0 +1,21 @@
+# Example only — adjust repo URL, targetRevision, and path to match your GitOps layout.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: chessverse-gdrive-sync
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/MultiagentVision/chessverse-monorepo.git
+    targetRevision: main
+    path: microservices/gdrive-sync-service/k8s
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: chessverse
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false

@@ -1,0 +1,16 @@
+# Service account JSON must exist as Secret gdrive-sync-drive-sa (key rehovot-drive-sa.json).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gdrive-sync-drives
+  namespace: chessverse
+  labels:
+    app.kubernetes.io/name: gdrive-sync
+    app.kubernetes.io/part-of: chessverse
+data:
+  drives.yaml: |
+    drives:
+      - name: rehovot
+        folder_id: "1BJFbwCtGKcuo6B13Jae-S5QkIq6MkyT4"
+        credentials_path: /secrets/rehovot-drive-sa.json
+        object_prefix: video/Rehovot

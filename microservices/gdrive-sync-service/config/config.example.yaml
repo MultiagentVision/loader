@@ -1,8 +1,11 @@
 drives:
-  - name: main
-    folder_id: "REPLACE_ME"
-    credentials_path: /secrets/main-sa.json
+  - name: rehovot
+    folder_id: "1BJFbwCtGKcuo6B13Jae-S5QkIq6MkyT4"
+    credentials_path: /secrets/rehovot-drive-sa.json
+    # Keys in MinIO: ``video/Rehovot/<driveFileId>_<filename>`` (bucket from MINIO_BUCKET, e.g. chess-ai).
+    object_prefix: video/Rehovot
 
   # - name: team2
   #   folder_id: "REPLACE_ME"
   #   credentials_path: /secrets/team2-sa.json
+  #   object_prefix: video/OtherCity

@@ -18,6 +18,7 @@ from app.services.dedupe import (
 )
 from app.services.drive_client import GoogleDriveClient
 from app.services.minio_client import MinioObjectStore
+from app.services.mime_utils import is_video_like
 from app.services.paths import build_object_key
 from app.services.drives_config import DriveConfig
 
@@ -78,17 +79,22 @@ async def run_upload_for_file(
 
                 meta = await asyncio.to_thread(drive.get_file_metadata, file_id)
                 mime = meta.get("mimeType") or ""
-                if "video/" not in mime:
-                    logger.info("skip non-video mime=%s drive=%s file_id=%s", mime, drive_name, file_id)
+                file_name = meta.get("name") or row.file_name
+                if not is_video_like(mime, file_name):
+                    logger.info("skip non-video mime=%s name=%s drive=%s file_id=%s", mime, file_name, drive_name, file_id)
                     return
 
-                file_name = meta.get("name") or row.file_name
                 incoming_checksum = meta.get("md5Checksum")
                 size = int(meta.get("size") or row.size or 0)
                 if size <= 0:
                     logger.info("skip zero-size drive=%s file_id=%s", drive_name, file_id)
                     return
-                canonical_path = build_object_key(drive_name, file_id, file_name)
+                canonical_path = build_object_key(
+                    drive_name,
+                    file_id,
+                    file_name,
+                    object_prefix=drive_cfg.object_prefix,
+                )
 
                 if should_skip_from_db(row, incoming_checksum=incoming_checksum, canonical_path=canonical_path):
                     logger.info("SKIP (DB): drive=%s file_id=%s name=%s", drive_name, file_id, file_name)

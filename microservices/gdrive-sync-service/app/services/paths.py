@@ -20,11 +20,18 @@ def sanitize_file_name(name: str, max_component_len: int = 200) -> str:
     return name
 
 
-def build_object_key(drive_name: str, file_id: str, file_name: str) -> str:
+def build_object_key(
+    drive_name: str,
+    file_id: str,
+    file_name: str,
+    *,
+    object_prefix: str | None = None,
+) -> str:
     safe = sanitize_file_name(file_name)
-    return f"{drive_name}/{file_id}_{safe}"
+    prefix = (object_prefix if object_prefix is not None else drive_name).strip().strip("/")
+    return f"{prefix}/{file_id}_{safe}"
 
 
 def object_name_in_bucket(object_key: str) -> str:
-    """Object key stored inside the `videos` bucket (no leading `videos/` prefix)."""
+    """Object key inside the configured bucket (no leading slash)."""
     return object_key.lstrip("/")

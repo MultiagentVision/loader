@@ -1,6 +1,6 @@
 # gdrive-sync-service
 
-Syncs `video/*` objects from multiple Google Drive folders (service accounts) into MinIO bucket `videos` with PostgreSQL as source of truth.
+Syncs video-like files (including `.h265` / `application/octet-stream`) from multiple Google Drive folders (service accounts) into a configurable MinIO bucket (production: **`chess-ai`**) under optional per-drive **`object_prefix`** (e.g. `video/Rehovot`), with PostgreSQL as source of truth.
 
 ## Quick start (local)
 

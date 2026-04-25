@@ -8,6 +8,8 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
+from app.services.mime_utils import is_video_like
+
 logger = logging.getLogger(__name__)
 
 
@@ -30,10 +32,8 @@ class GoogleDriveClient:
         self._http = AuthorizedSession(creds)
 
     def list_videos(self) -> list[dict[str, Any]]:
-        query = (
-            f"'{self.folder_id}' in parents and trashed = false "
-            "and mimeType contains 'video/'"
-        )
+        # Broad query: .h265 / octet-stream are not always ``mimeType contains 'video/'``.
+        query = f"'{self.folder_id}' in parents and trashed = false"
         items: list[dict[str, Any]] = []
         page_token: str | None = None
         while True:
@@ -56,7 +56,8 @@ class GoogleDriveClient:
                 raise
             for f in resp.get("files", []):
                 mime = f.get("mimeType") or ""
-                if "video/" not in mime:
+                name = f.get("name") or ""
+                if not is_video_like(mime, name):
                     continue
                 items.append(f)
             page_token = resp.get("nextPageToken")

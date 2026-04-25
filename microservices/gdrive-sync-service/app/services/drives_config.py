@@ -10,6 +10,8 @@ class DriveConfig(BaseModel):
     name: str = Field(min_length=1, max_length=128)
     folder_id: str = Field(min_length=1)
     credentials_path: Path
+    #: MinIO key prefix (no leading slash), e.g. ``video/Rehovot``. If unset, ``name`` is used.
+    object_prefix: str | None = Field(default=None, max_length=512)
 
 
 class DrivesRootConfig(BaseModel):
