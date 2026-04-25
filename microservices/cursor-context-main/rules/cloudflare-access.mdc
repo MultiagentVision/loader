@@ -1,0 +1,88 @@
+---
+description: Cloudflare Access — shared service tokens for all multiagent.vision services
+globs: **/cloudflare*, **/EXTERNAL_ACCESS*
+---
+
+# Cloudflare Access (multiagent.vision)
+
+## Shared Service Token
+
+**The same CF Access tokens are used for all services** behind Cloudflare Access:
+
+- `cvat.multiagent.vision` (bs2 / Traefik)
+- `mvat.multiagent.vision` (rke2 nginx Ingress — **requires DNS + tunnel**; see `infra/docs/MVAT_AND_CVAT_PARALLEL.md` if the hostname does not resolve)
+- `clearml.multiagent.vision` / `clearml-api.multiagent.vision` / `clearml-files.multiagent.vision`
+- `registry.multiagent.vision` (Harbor)
+- `jenkins.multiagent.vision`
+- Other `*.multiagent.vision` hosts on the same Access application
+
+
+## Headers for Machine-to-Machine Access
+
+Include these headers in HTTP requests when calling from outside the LAN (e.g. scripts, CI, external clients):
+
+```
+CF-Access-Client-Id: <CF_ACCESS_CLIENT_ID>
+CF-Access-Client-Secret: <CF_ACCESS_CLIENT_SECRET>
+```
+
+## Examples for Machine-to-Machine Access
+
+Use values from `cursor-context/secrets/cloudflare-access.env` (or your password manager). Do not commit real tokens.
+
+```bash
+# Export once per shell (example names — match your .env keys)
+export CF_ACCESS_CLIENT_ID="<your-client-id>.access"
+export CF_ACCESS_CLIENT_SECRET="<your-client-secret>"
+export JENKINS_USER="admin"
+export JENKINS_PASSWORD="<jenkins-admin-password>"
+
+# CVAT — should return 200
+curl -s -o /dev/null -w '%{http_code}' \
+  -H "CF-Access-Client-Id: ${CF_ACCESS_CLIENT_ID}" \
+  -H "CF-Access-Client-Secret: ${CF_ACCESS_CLIENT_SECRET}" \
+  "https://cvat.multiagent.vision/api/server/about"
+
+# MVAT — should return 200 (same service token as other *.multiagent.vision hosts)
+curl -s -o /dev/null -w '%{http_code}' \
+  -H "CF-Access-Client-Id: ${CF_ACCESS_CLIENT_ID}" \
+  -H "CF-Access-Client-Secret: ${CF_ACCESS_CLIENT_SECRET}" \
+  "https://mvat.multiagent.vision/api/server/about"
+
+# ClearML API — should return 401 (needs ClearML auth, but CF Access passes)
+curl -s -o /dev/null -w '%{http_code}' \
+  -H "CF-Access-Client-Id: ${CF_ACCESS_CLIENT_ID}" \
+  -H "CF-Access-Client-Secret: ${CF_ACCESS_CLIENT_SECRET}" \
+  "https://clearml-api.multiagent.vision/auth.login"
+
+# Jenkins — trigger build (crumb + build must share session via cookies)
+CRUMB=$(curl -s -c /tmp/jc.txt -b /tmp/jc.txt -u "${JENKINS_USER}:${JENKINS_PASSWORD}" \
+  -H "CF-Access-Client-Id: ${CF_ACCESS_CLIENT_ID}" \
+  -H "CF-Access-Client-Secret: ${CF_ACCESS_CLIENT_SECRET}" \
+  "https://jenkins.multiagent.vision/crumbIssuer/api/json" | python3 -c "import json,sys; print(json.load(sys.stdin)['crumb'])")
+curl -s -b /tmp/jc.txt -u "${JENKINS_USER}:${JENKINS_PASSWORD}" \
+  -H "CF-Access-Client-Id: ${CF_ACCESS_CLIENT_ID}" \
+  -H "CF-Access-Client-Secret: ${CF_ACCESS_CLIENT_SECRET}" \
+  -H "Jenkins-Crumb: $CRUMB" -X POST "https://jenkins.multiagent.vision/job/chessverse-monorepo/job/main/buildWithParameters"
+```
+
+**Jenkins crumb**: The crumb request and the build POST must share the same session. Use `-c` to save cookies, `-b` to send them. Without cookies, Jenkins returns 403 "No valid crumb".
+
+## Token Location
+
+- **Canonical**: `cursor-context/secrets/cloudflare-access.env` (gitignored) — copy from `cloudflare-access.env.example`, fill in.
+- **Doc**: `EXTERNAL_ACCESS_CVAT_CLEARML.md` (or Downloads) — full examples for CVAT, ClearML, curl.
+- **CVAT + MVAT parallel**: `infra/docs/MVAT_AND_CVAT_PARALLEL.md` — Cloudflare DNS/tunnel for `mvat.multiagent.vision`; `infra/scripts/check-cvat-mvat-public.sh` checks both APIs with this token.
+- **CVAT browser "Cannot connect"** while `/api/server/about` + token returns 200: (1) **Disk on CVAT Docker host (bs2)**: if **`/` ≥ ~90% full**, `/api/server/health/?format=json&org=` returns **500** (django-health-check DiskUsage) and the SPA shows "Cannot connect" — SSH to host, `df -h /`, free space (`docker image prune -af`), re-test health locally. (2) **Cloudflare**: complete Access SSO; if still broken, WAF **Skip** for Super Bot Fight Mode on `cvat.multiagent.vision` — see `infra/docs/EXTERNAL_ACCESS_CVAT_CLEARML.md` (*CVAT web UI*). Full write-up: `lessons/troubleshooting-log.md` **[2026-03-28] CVAT UI "Cannot connect"**.
+
+## Internal Access (No Tokens)
+
+On the same LAN (e.g. k8s on bs1/bs3), use internal IPs — no Cloudflare, no tokens:
+
+- CVAT: `http://10.0.0.5:8082`
+- ClearML: `http://10.0.0.5:8008` / `:9080` / `:9081`
+
+## Limitation: Docker/Kaniko
+
+Docker registry clients (Kaniko, containerd, docker) **do not support custom headers**. They cannot send CF-Access-Client-Id/Secret. For in-cluster pushes to Harbor, use the internal registry: `harbor-registry.harbor.svc.cluster.local:5000`.
+

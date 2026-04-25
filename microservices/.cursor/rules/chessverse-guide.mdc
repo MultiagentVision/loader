@@ -1,0 +1,32 @@
+---
+alwaysApply: false
+description: Chessverse dev guide: Python/FastAPI, git workflow, testing. Use when coding Python services, writing tests, or doing git/PR work.
+---
+
+# Chessverse Guide (Requestable)
+
+## Project
+- Stack: Python 3.13 + FastAPI. Layout: api/, core/, models/, services/, tests/
+- Logic in core/, not endpoints. Use .env, structured logging (no print), type hints
+
+## AI Style
+- Plan first (3–5 bullets), explain choice, types + docstrings, follow architecture
+- Never: print(), globals, hardcoded paths, logic in endpoints
+- Response: ## Plan → ## Implementation → ## Testing
+
+## Stack
+- FastAPI: Pydantic models, HTTPException, async/await, lifespan for resources
+- Node/React: TypeScript, service layer, proper status codes
+
+## Testing
+- pytest ≥80%, mock externals, test errors. Naming: test_<fn>_<scenario>
+- Unit: app/tests/unit/, Integration: TestClient, Engine: mock Stockfish
+
+## Git
+- Branch: feature/AI-XXX-desc, fix/AI-XXX-desc
+- Commit: AI-XXX: imperative brief (≤50 chars)
+- Pre-PR: ruff check/format, pyright, pytest --cov
+
+## Kubernetes (bs-cluster)
+- Before `kubectl` to **chessverse** namespaces: set `$env:KUBECONFIG` to the Rancher/Tailscale kubeconfig, or from monorepo root run `.\scripts\kubectl-bs.ps1 …` (defaults to `../keys/kubeconfig-rancher-ts.yaml`).
+- Plain `kubectl` without that uses `%USERPROFILE%\.kube\config` and may hit a dead API host (e.g. old DigitalOcean).

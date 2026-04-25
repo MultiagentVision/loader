@@ -1,0 +1,73 @@
+---
+description: Legacy video-to-PGN recognition app — structure, branches, pipeline, and model paths
+globs: legacy-recognition
+---
+
+# Legacy Recognition Repo
+
+## Location and Purpose
+- **Path**: `/Users/andrey/git/legacy-recognition`
+- **Remotes**: `origin` → `lavrand/legacy-recognition` (private), `upstream` → `MultiagentVision/monolith`
+- **Purpose**: Browser-based app that converts chess videos to PGN. Uses TensorFlow.js for piece and corner detection in the browser.
+
+## Tech Stack
+- **Frontend**: React 18, Vite, Redux Toolkit, chess.js, kokopu
+- **ML**: TensorFlow.js (WebGL backend), GraphModel for pieces and xcorners
+- **Run**: `yarn install && yarn build && yarn start` — then `o + Enter` to open browser
+- **Docker**: `docker-compose up -d`, config via `config.json` (deviceId, serverHost, serverPort, board)
+
+## Branches (upstream)
+- **main**: Default
+- **metal-gpu**: GPU-related changes
+- **correct-starting-position**: Starting-position fixes
+- **reverted-model-pieces**: Model revert
+- **models-b7-poc**: B7 models POC
+- **working_models_dev_2**, **working-model-game-1**, **working-model-development**: Working model variants
+- **feature/regret-mechanism**: Regret mechanism feature
+
+Check these branches when debugging or porting fixes.
+
+## Video → PGN Pipeline
+1. **Input**: Video file (upload) or webcam/RTSP (record/broadcast)
+2. **Corners**: `findCorners` + xcorners model → 4 corner keypoints
+3. **Warp**: `warp.tsx` — perspective transform to 8×8 grid (480×480)
+4. **Pieces**: `findPieces` + pieces model → 12-class logits per square
+5. **FEN**: `findFen` — map logits to FEN via chess.js validation
+6. **Moves**: `moves.tsx` — diff FENs, infer moves, update Redux `game`
+7. **PGN**: `gameSlice.makePgn` → `[FEN "…"]` + moves string; Export page shows it
+
+## Key Files
+- `src/utils/loadModels.tsx`: Loads `480_new_pices/model.json` and `480_new_xcorrners/model.json` (paths may differ per branch — check `public/`)
+- `src/utils/findFen.tsx`, `findPieces.tsx`: FEN and piece detection
+- `src/utils/warp.tsx`: Perspective transform
+- `src/slices/gameSlice.tsx`: `makePgn`, `gameSelect`, move state
+- `src/components/export/export.tsx`: Renders PGN from `makePgn(gameSelect())`
+- `config.json`: deviceId, serverHost, serverPort, board number
+
+## Model Paths (Canonical — Memorized 2026-02-17)
+- **Pieces**: `public/480M_pieces_float16/model.json` (TF.js GraphModel, 3-shard: group1-shard1of3.bin etc.)
+- **Corners**: `public/480L_xcorners_float16/model.json` (TF.js GraphModel, same shard layout)
+- **Input shape**: `[1, 960, 1088, 3]` NHWC — models expect 960×1088, NOT 480×480. Set `MODEL_HEIGHT=960`, `MODEL_WIDTH=1088` in constants.tsx.
+- **Named input**: TF.js execute requires `{ x: tensor }` — Placeholder node is named `"x"`.
+- **loadModels.tsx**: Use `model.execute({ x: dummyInput })` with shape `[1, 960, 1088, 3]`.
+
+## Integration with algo / cursor-context
+- **algo**: Python YOLO26 + RecoAlgo pipeline (server-side). Legacy-recognition is a separate browser app.
+- **cursor-context/models**: Best YOLO26 `.pt` models for server-side use; legacy-recognition uses TF.js `.json` models in `public/`.
+- **GPU endpoints**: Instead of TF.js, legacy can call algo at `http://localhost:8765` (video API: open, calibrate, step, play, pgn) or cameras API (capture, recalibrate). See `legacy-new-models.mdc` Option 4.
+
+## Adding New Models
+
+Legacy uses **TF.js only**. To add new models:
+
+1. **YOLO26 PyTorch → TF.js**: `yolo export model=yolo26_pieces.pt format=tfjs imgsz=960,1088 half=True` → creates `*_web_model/`
+2. **Copy** `*_web_model/` → `public/<name>/` (e.g. `public/yolo26_pieces_tfjs/`)
+3. **Update** `loadModels.tsx`: change path from `"480M_pieces_float16/model.json"` to `"<name>/model.json"`
+4. **Input shape**: Must match `constants.tsx` (MODEL_HEIGHT=960, MODEL_WIDTH=1088). If model uses different size, update constants.
+5. **Output format**: `getBoxesAndScores` in detect.tsx expects `[xc, yc, w, h, score_b, ..., score_R]`. Ultralytics TF.js export may differ — adapt post-processing if needed.
+6. **RecoAlgo**: PyTorch ConvNeXt — not trivial to convert to TF.js. Prefer algo server-side for RecoAlgo.
+
+## For Agents
+- Run `git branch -a` to see all branches
+- Search for `findFen`, `findPieces`, `makePgn`, `loadModels` to trace the pipeline
+- Check `config.json` and `README.md` for run/deploy instructions

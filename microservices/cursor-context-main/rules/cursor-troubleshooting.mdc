@@ -1,0 +1,39 @@
+---
+description: Solutions for common Cursor IDE UI issues, bugs, blinking, and glitches
+globs: 
+---
+
+# Cursor IDE Troubleshooting
+
+## 🚨 UI Blinking / Flickering Plans
+**Symptoms**: The Cursor window blinks, refreshes rapidly, or shows old/stale "Plan" tabs opening and closing.
+**Cause**: Accumulation of temporary plan files in the internal Cursor state folder.
+**Fix**: Archive or delete files in `~/.cursor/plans/`.
+
+```bash
+# Archive plans to stop blinking
+mkdir -p ~/.cursor/plans_archived
+mv ~/.cursor/plans/* ~/.cursor/plans_archived/ 2>/dev/null
+```
+
+**Prevention**: Run the archive command periodically (e.g. weekly) or when blinking starts. Close plan tabs before running agents.
+
+## 📝 "Content is Newer" / Overwrite Prompt
+**Symptoms**: "The content of the file is newer. Do you want to overwrite or revert?" popup appears repeatedly.
+**Cause**: The Agent modified a file that is open in the Editor; Cursor detects a conflict.
+**Fix**:
+- If the Agent made the changes: Click **Overwrite**.
+- If the User made changes: Click **Revert** (but Agent work is lost).
+
+**Prevention (for Agents)**:
+- **NEVER edit files in `~/.cursor/plans/` or any `*.plan.md`** — treat them as read-only.
+- Avoid editing files that are likely open (e.g. the active plan tab). Prefer creating new files or editing files not in the plan path.
+
+## 🐢 Slow / Laggy Response
+**Cause**: Large context or too many open files.
+**Fix**: Close unused tabs and run `SwitchMode` to "Agent" or "Chat" to reset context context.
+
+## 🟢 Stale Git Status (Folder Shows Green)
+**Symptoms**: A folder/repo shows green (uncommitted changes) in the sidebar, but `git status` is clean.
+**Cause**: Cursor's git state cache is stale, especially in multi-root workspaces.
+**Fix**: `Cmd+Shift+P` → **Developer: Reload Window**. Reload refreshes the git status display.

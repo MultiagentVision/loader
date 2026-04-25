@@ -1,0 +1,107 @@
+---
+description: Jenkins + Harbor + ArgoCD CI/CD pipeline — replaces GitHub Actions to avoid March 2026 billing
+globs: Jenkinsfile*, **/jenkins/**, **/harbor/**, chessverse-appset*, charts/chessverse-service/**
+---
+
+# Jenkins CI/CD Pipeline
+
+## Architecture
+
+```
+GitHub (PR/push) → Jenkins (build) → Harbor (registry) → ArgoCD (deploy)
+```
+
+- **Jenkins**: `jenkins.multiagent.vision` (Cloudflare Tunnel — proxmox-tunnel)
+- **Harbor**: `registry.multiagent.vision` (external). **Jenkins push** uses `registry.multiagent.vision` with `hostAliases` (→ ingress IP 10.0.0.201) to bypass CF for token endpoint; `--skip-tls-verify` for Kaniko.
+- **ArgoCD**: Manages apps from gitops repo; ApplicationSets derive image tags from repo metadata (no gitops update)
+
+## Key Paths
+
+| Component | Path |
+|-----------|------|
+| Jenkins app | `gitops/apps/infra/jenkins/` |
+| Harbor setup | `gitops/apps/infra/jenkins/HARBOR_SETUP.md` |
+| Jenkins setup | `gitops/apps/infra/jenkins/JENKINS_SETUP.md` |
+| chessverse-service chart | `gitops/charts/chessverse-service/` |
+| Production ApplicationSet | `gitops/apps/chessverse/chessverse-production-appset.yaml` |
+| Jenkinsfile (services) | `chessverse-monorepo/Jenkinsfile` |
+| Per-service jobs (JCasC) | `gitops/apps/infra/jenkins/values.yaml` → `chessverse-services` configScript → folder **`chessverse/`** + 9 `pipelineJob`s |
+| Jenkinsfile (preview) | `chessverse-monorepo/Jenkinsfile.preview` |
+| Jenkinsfile (frontend) | `frontend/Jenkinsfile` |
+| Jenkinsfile (MVAT) | `mvat/Jenkinsfile` (repo `MultiagentVision/mvat`) |
+| deploy metadata | `chessverse-monorepo/deploy/metadata.yaml` |
+| MVAT deploy metadata | `mvat/deploy/metadata.yaml` — pushed by Jenkins using PAT |
+
+## Chessverse monorepo — GitHub PAT (`jenkins-token` / `multiagent-ci`)
+
+- **Jenkins credential ID**: **`jenkins-token`** (JCasC username/password: user `x-access-token`, password = PAT). Used for multibranch **clone** of `MultiagentVision/chessverse-monorepo`, **per-service jobs** under `chessverse/*`, and for the **Update metadata** stage (`chessverse-monorepo/Jenkinsfile` → `withCredentials` / HTTPS push).
+- **Policy**: Prefer a **single org service account** (GitHub **`multiagent-ci`**) with a classic PAT (often named **`jenkins-token`** on GitHub: scopes `repo`, `workflow`, `write:packages` as needed). Avoid per-developer PATs that rotate independently. Legacy UI credential **`git-deploy-multiagent-ci token`** should be removed once JCasC credentials are verified — CasC is the source of truth for credential IDs.
+- **Where the secret value lives**: **Do not** commit PAT strings into any Git repo (including `cursor-context`). Prefer **HashiCorp Vault** as source of truth, then sync into the cluster:
+  - Example KV (adjust mount/path to your Vault layout):  
+    `vault kv put secret/jenkins/github token=<PAT> mvat_github_pat=<optional second PAT or same>`
+  - Sync into Kubernetes `Secret` **`github-token`** in namespace **`jenkins`** (keys `token`, optional `mvat_github_pat`) via **External Secrets** — same pattern as `gitops/apps/infra/jenkins/external-secret-credentials.yaml` (`ClusterSecretStore` `vault-backend`). See `gitops/apps/infra/jenkins/JENKINS_SETUP.md` §5 and §5a.
+- **Fallback**: `setup-secrets.sh` / `kubectl create secret generic github-token` from a local gitignored env file — operational only, not for publishing the value in docs or rules.
+- **Full operator checklist**: [`repos/jenkins-github-pat-vault-rollout.md`](../repos/jenkins-github-pat-vault-rollout.md) (Vault → ExternalSecret → `github-token` → all Jenkins jobs).
+- **ExternalSecret vs existing secret**: If **`github-token`** was created manually before GitOps shipped `ExternalSecret github-token`, use **`creationPolicy: Merge`** on the ExternalSecret target so the operator can add/update keys without ownership fights. See `gitops/apps/infra/jenkins/templates/external-secret-github-token.yaml`.
+
+## Chessverse per-service jobs (`chessverse/<service>`)
+
+- **Folder**: **`chessverse`** (display name *Chessverse Microservices*). **Jobs**: one `pipelineJob` per buildable microservice — `bff`, `train`, `tournament`, `tournament-service-be`, `history`, `alerts`, `rtsp_to_queue`, `rtsp_to_hls`, `rtsp_emu_many`.
+- **Definition**: Each job uses **cpsScm** → `https://github.com/MultiagentVision/chessverse-monorepo.git`, branch **`*/main`**, script path **`Jenkinsfile`**, credential **`jenkins-token`**.
+- **No `SERVICE` parameter required**: `chessverse-monorepo/Jenkinsfile` derives **`SERVICE_FIXED`** from **`env.JOB_NAME`**: the last path segment after splitting on `/` must match a known service name (e.g. job `chessverse/bff` → `bff`). If there is no match (e.g. multibranch job name), the pipeline falls back to the interactive **`SERVICE`** parameter — so the shared **`chessverse-monorepo`** multibranch job keeps working unchanged.
+- **Metadata stage**: **Update metadata** runs when `branch 'main'` **or** `SERVICE_FIXED != null` (per-service jobs always build `main` but are not multibranch, so `branch 'main'` alone would skip the stage).
+- **GitOps**: JCasC script key **`chessverse-services`** in `gitops/apps/infra/jenkins/values.yaml`. ArgoCD app **`jenkins`** must be synced after edits.
+- **Job DSL + JCasC caveat**: On some reloads, JCasC may create the **`chessverse`** folder but **not** materialize the inner `pipelineJob` entries from a Groovy `.each { }` block. If the folder is empty after sync/reload, run the equivalent **Job DSL** once from **Manage Jenkins → Script Console** (see rollout doc §10) or restart the controller and re-check; pod names for Kaniko agents should look like **`chessverse-<service>-<build>-*`** when detection works.
+
+### Declarative Pipeline: `timestamps()` option
+
+If the console shows **`Invalid option type "timestamps"`** / valid options list without `timestamps`, the **Timestamper** plugin is not installed. **Remove** `timestamps()` from `options { }` in `Jenkinsfile` (and `Jenkinsfile.preview`); the pipeline should compile without it.
+
+## Image Tags
+
+- **Preview**: `registry.multiagent.vision/chessverse/app:{{head_sha}}` (ApplicationSet pullRequest generator)
+- **Production**: `registry.multiagent.vision/chessverse/<service>:sha-{{sha}}` (from `deploy/metadata.yaml`)
+- **Frontend**: `registry.multiagent.vision/chessverse/frontend:sha-<commit>` and `:latest` (ArgoCD `chessverse-frontend` app)
+
+## MVAT (`mvat/main`)
+
+- **Job**: `mvat` multibranch → `main`.
+- **Registry push**: Kaniko + `hostAliases` to `10.0.0.201` for `registry.multiagent.vision` + `--skip-tls-verify-registry` (Harbor TLS).
+- **Metadata push**: Stage **Update deploy/metadata.yaml** uses `withCredentials([string(credentialsId: 'mvat-github-pat', variable: 'GH_TOKEN')])` and HTTPS `x-access-token` push. The deploy key **`mvat-github-deploy-key`** is for **clone** only (often read-only); it does **not** satisfy this stage.
+- **GitOps (required)**: JCasC in `gitops/apps/infra/jenkins/values.yaml` defines **Secret text** credential **`mvat-github-pat`** → `${mvat_github_pat}`. Controller gets that env var from **`github-token`** secret key **`mvat_github_pat`** (`containerEnvFrom` already mounts the secret). After changing values, **sync** Argo app `jenkins` and **restart** the controller pod.
+- **PAT**: Classic **`repo`** or fine-grained **Contents: Read and write** on `MultiagentVision/mvat`; SSO-authorized if required. Same value as `github-token` key `token` is OK if that PAT can push to **mvat**.
+- **Ops**: `setup-secrets.sh` supports optional **`MVAT_GITHUB_PAT`**. See `gitops/apps/infra/jenkins/JENKINS_SETUP.md` §5a. **Symptom** “Could not find credentials entry with ID 'mvat-github-pat'” → missing JCasC sync or missing secret key; “read only” on push → wrong token or insufficient scopes.
+- **Local copy (gitignored)**: `cursor-context/secrets/mvat-github-pat` — one line, PAT only; or keep MVAT push PAT only in Vault (see § Chessverse monorepo — `mvat_github_pat` on `github-token`).
+
+## Frontend Pipeline
+
+- **Job**: `frontend` (Pipeline, not Multibranch) — Pipeline script from SCM, repo `https://github.com/MultiagentVision/frontend`, branch `*/main`, script path `Jenkinsfile`.
+- **Credential**: **`github-frontend`** — JCasC username/password (`x-access-token` / `${token}`) from Kubernetes Secret **`github-token`** key **`token`**, synced from Vault via ExternalSecret `github-token` (see `gitops/apps/infra/jenkins/templates/external-secret-github-token.yaml`). **Service account**: GitHub **`multiagent-ci`** (PAT name on GitHub is typically `jenkins-token`). Same PAT material as JCasC **`jenkins-token`**. After JCasC is live, remove any legacy manual credential such as **`git-deploy-multiagent-ci token`** so only CasC-defined IDs are used.
+
+## Required Secrets (jenkins namespace)
+
+- `harbor-credentials` — docker-registry secret; **docker-server must be** `registry.multiagent.vision` (Jenkinsfile uses hostAliases to bypass CF; robot token from Harbor project chessverse)
+- `github-token` — keys: **`token`** (PAT for JCasC **`jenkins-token`**: chessverse-monorepo clone + metadata push), optional **`mvat_github_pat`** (JCasC **`mvat-github-pat`** for MVAT metadata push). **Prefer populating from Vault** → ExternalSecret → this secret (see § Chessverse monorepo — corporate GitHub PAT).
+- `github-webhook-secret` — optional, for webhook validation
+
+**Operator-only copies**: `cursor-context/secrets/jenkins.env` (gitignored) — from `jenkins.env.example`; use with `setup-secrets.sh` when not using Vault sync. PAT values are **not** stored in committed rules or markdown.
+
+## Harbor S3 / MinIO (required for image storage)
+
+Harbor uses MinIO for registry storage. Create `harbor-registry-s3` secret in Harbor namespace with `REGISTRY_STORAGE_S3_ACCESSKEY` and `REGISTRY_STORAGE_S3_SECRETKEY` from MinIO. Harbor values use `existingSecret: harbor-registry-s3`. Create bucket `harbor-registry` in MinIO (console or `aws s3 mb s3://harbor-registry --endpoint-url https://s3.multiagent.vision`).
+
+## Cloudflare Tunnel
+
+Add `jenkins` to proxmox-tunnel public hostnames: Zero Trust → Networks → Tunnels → proxmox-tunnel → Public Hostname → `jenkins.multiagent.vision` → same service as ArgoCD/fe.
+
+## API Trigger (from outside cluster)
+
+Jenkins is behind Cloudflare Access. Use CF tokens + session cookies for crumb. See `rules/cloudflare-access.mdc` for the full curl example. Key: crumb request and build POST must share cookies (`-c` save, `-b` send).
+
+## ARC Retirement
+
+ARC (Actions Runner Controller) incurs GitHub Actions billing ($0.002/min from March 2026). Retire after Jenkins validation: `kubectl delete application arc-controller arc-runners-chessverse -n argocd`.
+
+## Kaniko in Kubernetes — Dockerfile Constraints
+
+Kaniko runs inside a K8s pod. **Avoid** `chmod -R` or `chown -R` on `/var/run` — the pod mounts `/var/run/secrets/kubernetes.io/serviceaccount` read-only; recursive operations fail with "Read-only file system". Only chmod/chown the specific dirs you create (e.g. `/var/cache/nginx`). The base image (e.g. nginx:alpine) already sets up `/var/run` for PID files.

@@ -1,0 +1,106 @@
+# -----------------------------------------------------------------------------
+# CI: Tournament — trigger Jenkins (Kaniko → registry.multiagent.vision)
+# -----------------------------------------------------------------------------
+name: CI - Tournament
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "microservices/tournament/**"
+      - ".github/workflows/ci-tournament.yml"
+  workflow_dispatch:
+
+jobs:
+  trigger-jenkins:
+    name: Trigger Jenkins deploy
+    if: ${{ github.event_name != 'push' || !contains(github.event.head_commit.message, '[gha-manifest-only]') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Validate Jenkins secrets
+        run: |
+          test -n "${{ secrets.CF_ACCESS_CLIENT_ID }}"
+          test -n "${{ secrets.CF_ACCESS_CLIENT_SECRET }}"
+          test -n "${{ secrets.JENKINS_USER }}"
+          test -n "${{ secrets.JENKINS_API_TOKEN }}"
+
+      - name: Get Jenkins crumb
+        id: crumb
+        env:
+          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+          JENKINS_USER: ${{ secrets.JENKINS_USER }}
+          JENKINS_API_TOKEN: ${{ secrets.JENKINS_API_TOKEN }}
+        run: |
+          curl -sS -D /tmp/crumb_headers.txt -o /tmp/crumb_body.txt \
+            "https://jenkins.multiagent.vision/crumbIssuer/api/json" \
+            -H "CF-Access-Client-Id: ${CF_ACCESS_CLIENT_ID}" \
+            -H "CF-Access-Client-Secret: ${CF_ACCESS_CLIENT_SECRET}" \
+            --user "${JENKINS_USER}:${JENKINS_API_TOKEN}"
+
+          STATUS_CODE="$(awk 'toupper($1) ~ /^HTTP/ {code=$2} END {print code}' /tmp/crumb_headers.txt)"
+          LOCATION_HEADER="$(awk 'BEGIN{IGNORECASE=1} /^location:/ {print $2}' /tmp/crumb_headers.txt | tr -d '\r' | tail -1)"
+
+          if [ "${STATUS_CODE}" = "302" ] && echo "${LOCATION_HEADER}" | grep -q "cdn-cgi/access/login"; then
+            echo "Cloudflare Access rejected service credentials while requesting Jenkins crumb."
+            cat /tmp/crumb_headers.txt
+            exit 1
+          fi
+
+          if [ "${STATUS_CODE}" != "200" ]; then
+            echo "Unexpected Jenkins crumb status: ${STATUS_CODE}"
+            cat /tmp/crumb_headers.txt
+            cat /tmp/crumb_body.txt
+            exit 1
+          fi
+
+          CRUMB="$(python3 -c 'import json,sys; print(json.loads(sys.stdin.read())["crumb"])' < /tmp/crumb_body.txt)"
+          if [ -z "${CRUMB}" ]; then
+            echo "Failed to get Jenkins crumb"
+            cat /tmp/crumb_headers.txt
+            cat /tmp/crumb_body.txt
+            exit 1
+          fi
+          echo "value=${CRUMB}" >> "$GITHUB_OUTPUT"
+
+      - name: Trigger chessverse-monorepo Jenkins job (SERVICE=tournament)
+        env:
+          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+          JENKINS_USER: ${{ secrets.JENKINS_USER }}
+          JENKINS_API_TOKEN: ${{ secrets.JENKINS_API_TOKEN }}
+          JENKINS_CRUMB: ${{ steps.crumb.outputs.value }}
+        run: |
+          curl -sS -D /tmp/jenkins_headers.txt -o /tmp/jenkins_body.txt \
+            -X POST "https://jenkins.multiagent.vision/job/chessverse-monorepo/job/main/buildWithParameters?SERVICE=tournament" \
+            -H "CF-Access-Client-Id: ${CF_ACCESS_CLIENT_ID}" \
+            -H "CF-Access-Client-Secret: ${CF_ACCESS_CLIENT_SECRET}" \
+            -H "Jenkins-Crumb: ${JENKINS_CRUMB}" \
+            --user "${JENKINS_USER}:${JENKINS_API_TOKEN}"
+
+          STATUS_CODE="$(awk 'toupper($1) ~ /^HTTP/ {code=$2} END {print code}' /tmp/jenkins_headers.txt)"
+          LOCATION_HEADER="$(awk 'BEGIN{IGNORECASE=1} /^location:/ {print $2}' /tmp/jenkins_headers.txt | tr -d '\r' | tail -1)"
+
+          if [ "${STATUS_CODE}" = "302" ] && echo "${LOCATION_HEADER}" | grep -q "cdn-cgi/access/login"; then
+            echo "Cloudflare Access rejected service credentials."
+            cat /tmp/jenkins_headers.txt
+            exit 1
+          fi
+
+          if [ "${STATUS_CODE}" != "201" ] && [ "${STATUS_CODE}" != "302" ]; then
+            echo "Unexpected Jenkins trigger status: ${STATUS_CODE}"
+            cat /tmp/jenkins_headers.txt
+            cat /tmp/jenkins_body.txt
+            exit 1
+          fi
+
+      - name: Jenkins trigger summary
+        run: |
+          echo "### Jenkins tournament build queued" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Kaniko push → **registry.multiagent.vision/chessverse/tournament**; on \`main\`, Jenkins updates \`deploy/metadata.yaml\` for Argo." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Job: https://jenkins.multiagent.vision/job/chessverse-monorepo/job/main/" >> $GITHUB_STEP_SUMMARY

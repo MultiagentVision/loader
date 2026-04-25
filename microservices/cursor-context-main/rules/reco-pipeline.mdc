@@ -1,0 +1,54 @@
+---
+description: Architecture and constraints of the Chessverse Recognition Pipeline (RecoAlgo + YOLO26)
+globs: **/*.py, **/*.pt
+---
+
+# Recognition Pipeline Architecture
+
+## 🧠 Hybrid Model Approach
+The system uses a two-stage hybrid pipeline:
+1.  **Detection & Warping (YOLO26)**: Finds board corners and warps the image.
+2.  **Classification (RecoAlgo)**: Classifies pieces on the warped board.
+
+## 📏 Critical Constraints
+- **Warp Resolution**: **MUST BE 480x480**.
+    - The RecoAlgo classifier is trained on 60x60 px cells extracted from a 480x480 board.
+    - **Do NOT change** `OUTPUT_SIZE = 480` in `warp.py` without retraining the classifier.
+- **Input Size**: Pipeline accepts any resolution (4K supported), but internally resizes for detection.
+
+## 📦 Model Files
+Located in `algo/models/` or `cursor-context/models/`:
+- `yolo26_boards.pt`: Detects chess boards.
+- `yolo26_xcorners.pt`: Detects grid intersections.
+- `yolo26_pieces.pt`: **(Optional)** YOLO piece detection.
+    - *Note*: YOLO piece detection is currently used for validation/merging but RecoAlgo is the primary classifier.
+
+## 🔬 Xcorner Calibration (Live Stream)
+
+### Always calibrate from the full scene frame
+- **DO NOT** run `calibrate_from_frame` on individual board crops. The small crop lacks spatial context — DBSCAN clustering fails to separate boards, and `warp_and_orient_board` grid fitting often fails, falling back to weak `4corner_fallback`.
+- **DO** run `calibrate_from_frame(scene_frame, board_index=i)` on the full scene-cropped frame. This detects all xcorners at once and properly clusters them into separate boards.
+- Example: Individual crop → 48 corners, 1 cluster, grid fitting fails. Full scene → 98 corners, 2 clusters (47+47), `35pt_adaptive` succeeds for both boards.
+
+### Homography is relative to the calibration frame
+- If H was computed from the scene frame, `gt_warp_frame` must also receive the scene frame (not a board crop). Mismatched coordinate systems produce garbage warps.
+
+### 4-corner fallback quality
+- The `4corner_fallback` method always returns `n_inliers=4`. Rejecting all fallbacks with `n_inliers <= 4` rejects them unconditionally.
+- Accept 4-corner fallback when `n_board_pts >= 20` (many detected corners make the convex hull accurate).
+
+### Grid alignment correction (runtime)
+- After calibration, the homography H may place the board grid with a fractional-cell offset (~30px) because the xcorner model sometimes detects board-frame edge corners alongside the 49 internal intersections.
+- `detect_grid_offset` (brightness-based) **cannot** detect this: it works modulo 60px, and in low light it may have too few vertical samples (below MIN_RELIABLE=25) to measure dy at all.
+- `detect_grid_offset_xcorners` also **cannot** detect this: it snaps each corner to the nearest grid line, so full-cell and fractional-cell offsets wrap to ~0.
+- **Fix**: On the first frame, run xcorner detection on the **pre-rotation** warped image (`cv2.warpPerspective` without `cv2.rotate`). The median Y of detected xcorners should be 240.0 for a properly aligned 7x7 grid. Apply `T @ H` where `T[1,2] = 240.0 - median_y` and `T[0,2] = 240.0 - median_x`. Only correct if |offset| > 5px.
+- **Critical**: Apply correction in pre-rotation space, not post-rotation. For rot=180, the sign flips.
+
+### FEN flipping for upside-down boards
+- When `rot=180` and the board is physically upside-down (white at top in the warped image), do **not** change the rotation (changing rot breaks grid alignment). Instead, detect on the first frame via YOLO probe (check if rank 8 has more uppercase than lowercase), and flip the FEN results (reverse the 64-cell array and rebuild FEN string) before merging.
+
+## 🔄 Merging Strategy
+If both YOLO26 (pieces) and RecoAlgo are active:
+- **YOLO Primary**: If YOLO detects a piece with high confidence, it overrides RecoAlgo.
+- **Fallback**: If YOLO sees nothing (or is disabled), RecoAlgo results are used.
+- **Validation**: Check `mAP` of `yolo26_pieces.pt` before enabling. Broken models (0.0 mAP) should be disabled.

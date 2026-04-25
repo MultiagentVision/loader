@@ -1,0 +1,53 @@
+---
+description: Landing page contact form — Telegram + Resend via Cloudflare Pages Function.
+globs: landing/functions/**/*.js, landing/.env*
+---
+# Landing Contact Form
+
+- **Stack**: Cloudflare Pages Function at `functions/api/leads.js`, POST `/api/leads`.
+- **Destinations**: Telegram (instant notification) + Resend (email).
+- **Bot**: `@multiagent_landing_bot` — token and chat ID in `cursor-context/secrets/landing.env`.
+
+## Required env vars (Cloudflare Pages)
+
+Set in **Workers & Pages > landing > Settings > Environment variables** (Production + Preview):
+
+| Variable | Description |
+|----------|-------------|
+| `TELEGRAM_BOT_TOKEN` | From @BotFather |
+| `TELEGRAM_CHAT_ID` | Group/channel ID where bot is added |
+| `RESEND_API_KEY` | From https://resend.com/api-keys |
+| `RESEND_TO_EMAIL` | Where leads are sent (e.g. lavrandge@gmail.com) |
+| `RESEND_FROM_EMAIL` | Optional. Default: `MultiAgent Vision <onboarding@resend.dev>`. Use `leads@multiagent.vision` once domain DKIM is verified. |
+
+## Domain verification (Resend)
+
+Add the `resend._domainkey` TXT record in Cloudflare DNS for multiagent.vision. Once verified, set `RESEND_FROM_EMAIL=MultiAgent Vision <leads@multiagent.vision>`.
+
+## Lessons learned: Web3Forms vs Resend
+
+- **Web3Forms fails from Cloudflare Pages Functions** with error 1106 ("IP banned"). Cloudflare Workers/Pages use shared IPs; Web3Forms blocks them. No workaround from our side.
+- **Resend** is the recommended solution: API key auth, no IP blocking, official Cloudflare docs. Use Resend for contact forms on Cloudflare Pages.
+
+## Secrets location
+
+- **cursor-context**: `secrets/landing.env` (gitignored) — canonical copy for agents.
+- **Cloudflare**: Set via Dashboard or `wrangler pages secret put KEY --project-name=landing`.
+
+## CLI: set secrets (run from `landing` repo)
+
+Requires `wrangler login` first. Bulk upload accepts `.env` or `.dev.vars` (KEY=VALUE, no comments):
+
+```bash
+cd landing
+wrangler pages secret bulk --project-name=landing --env-file=../cursor-context/secrets/landing.env
+```
+
+Or set individually:
+
+```bash
+echo "YOUR_TOKEN" | wrangler pages secret put TELEGRAM_BOT_TOKEN --project-name=landing
+echo "-5143206875" | wrangler pages secret put TELEGRAM_CHAT_ID --project-name=landing
+echo "re_xxx" | wrangler pages secret put RESEND_API_KEY --project-name=landing
+echo "lavrandge@gmail.com" | wrangler pages secret put RESEND_TO_EMAIL --project-name=landing
+```

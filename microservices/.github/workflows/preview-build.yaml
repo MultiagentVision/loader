@@ -1,0 +1,40 @@
+name: Preview Build
+
+on:
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build-and-push:
+    runs-on: arc-runner-set # Use the runner set created by ARC
+    # Ensure runner has the secret mounted at /kaniko/.docker/config.json
+    container:
+      image: gcr.io/kaniko-project/executor:v1.23.2-debug
+      # Mount the volume containing the docker config secret
+      # This assumes the runner pod has the secret mounted at /kaniko/.docker/config.json
+      # which ARC configured via the RunnerScaleSet template.
+      # If ARC runner mounts it to /mnt/docker-config, adjust accordingly.
+      # We assume standard setup where secret is mounted.
+      volumes:
+        - /kaniko/.docker:/kaniko/.docker
+
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Build and Push with Kaniko
+        run: |
+          /kaniko/executor \
+            --dockerfile=Dockerfile \
+            --context=dir://. \
+            --destination=registry.multiagent.vision/chessverse/app:${{ github.sha }} \
+            --destination=registry.multiagent.vision/chessverse/app:pr-${{ github.event.number }} \
+            --cache=true \
+            --cache-repo=registry.multiagent.vision/chessverse/cache
+        env:
+          # Tell Kaniko where to find config.json if not in /kaniko/.docker/config.json
+          # But default is ~/.docker/config.json or /kaniko/.docker/config.json
+          # If mounted correctly, it works.
+          DOCKER_CONFIG: /kaniko/.docker
+
+      # TODO: Update --dockerfile path to point to the actual service Dockerfile (e.g. packages/backend/server-be/Dockerfile)
+      # TODO: Update --context if needed (e.g. dir://packages/backend/server-be)

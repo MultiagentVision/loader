@@ -1,0 +1,63 @@
+name: Uffizzi Preview Environments
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-and-deploy:
+    if: ${{ github.event.action != 'closed' }}
+    runs-on: [self-hosted, linux, x64]
+    environment: YAROSLAV_ENV
+    defaults:
+      run:
+        working-directory: microservices
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Launch cameras on other containers, 192.168.1.130+
+        env:
+          DOCKER_HOST: tcp://10.0.0.130:2375
+        run: docker compose -f ./videostreaming/rtsp_emu_many/docker-compose.yml up -d
+
+      # We have 3.11 on k8s-uffizzi
+      - name: Building cameras list
+        # Use camera password as env value CAMERA_DEFAULT_PASSWORD for prod.
+        run: cp ./videostreaming/cameras-cfg-proxmox.json ./videostreaming/rtsp_to_hls/cameras.json
+
+      - name: Create .env file
+        working-directory: ./microservices
+        run: |
+         echo "ALERTS_PORT=${{ secrets.ALERTS_PORT }}" >> .env
+         echo "MONGO_ROOT_USERNAME=${{ secrets.MONGO_ROOT_USERNAME }}" >> .env
+         echo "MONGO_ROOT_PASSWORD=${{ secrets.MONGO_ROOT_PASSWORD }}" >> .env
+         echo "MONGO_PORT=${{ secrets.MONGO_PORT }}" >> .env
+         echo "MONGO_DB_NAME=${{ secrets.MONGO_DB_NAME }}" >> .env
+         echo "REDIS_HOST=${{ secrets.REDIS_HOST }}" >> .env
+         echo "REDIS_PORT=${{ secrets.REDIS_PORT }}" >> .env
+         echo "RABBITMQ_PORT=${{ secrets.RABBITMQ_PORT }}" >> .env
+         echo "RABBITMQ_USER=${{ secrets.RABBITMQ_USER }}" >> .env
+         echo "RABBITMQ_PASSWORD=${{ secrets.RABBITMQ_PASSWORD }}" >> .env
+         echo "RABBITMQ_CAMERAS_VHOST=${{ secrets.RABBITMQ_CAMERAS_VHOST }}" >> .env
+         echo "RABBITMQ_URL=amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@rabbitmq:${RABBITMQ_PORT}" >> .env
+         echo "LOG_LEVEL=info" >> .env
+         echo "VAPID_PUBLIC_KEY=1" >> .env
+         echo "VAPID_PRIVATE_KEY=1" >> .env
+         echo "VAPID_SUBJECT=1" >> .env
+         cp .env ./alerts/.env
+
+      - name: Build and run images (docker-compose)
+        env:
+          RTSP_PASSWORD_SERVER__10_0_0_9: ${{ secrets.RTSP_PASSWORD_SERVER__10_0_0_9 }}
+          RTSP_PASSWORD_SERVER__10_0_0_16: ${{ secrets.RTSP_PASSWORD_SERVER__10_0_0_16 }}
+          RTSP_PASSWORD_SERVER__10_0_0_2: ${{ secrets.RTSP_PASSWORD_SERVER__10_0_0_2 }}
+          RABBITMQ_PASSWORD: ${{ secrets.RABBITMQ_PASSWORD }}
+          RABBITMQ_PORT: ${{ secrets.RABBITMQ_PORT }}
+          RABBITMQ_USER: ${{ secrets.RABBITMQ_USER }}
+          RABBITMQ_CAMERAS_VHOST: ${{ secrets.RABBITMQ_CAMERAS_VHOST }}
+        run: |
+          docker compose -f ./docker-compose.basic.yml -f ./docker-compose.yml build
+          docker compose -f ./docker-compose.basic.yml -f ./docker-compose.yml up -d
+

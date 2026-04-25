@@ -1,0 +1,8 @@
+drives:
+  - name: main
+    folder_id: "REPLACE_ME"
+    credentials_path: /secrets/main-sa.json
+
+  # - name: team2
+  #   folder_id: "REPLACE_ME"
+  #   credentials_path: /secrets/team2-sa.json

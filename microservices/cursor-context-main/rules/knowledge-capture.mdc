@@ -1,0 +1,43 @@
+---
+description: Protocol for capturing lessons learned, fixes, and project knowledge for future agents
+globs: **/*.md
+---
+
+# 🧠 Knowledge Capture Protocol
+
+## When to Use
+Trigger this protocol when:
+1.  You solve a non-trivial error (e.g., "model 0.0 mAP", "hidden folder caused bug").
+2.  You discover a new project constraint (e.g., "NVR IP changed", "Warp must be 480x480").
+3.  The user explicitly asks to "memorize" or "learn" something.
+
+## 💾 Auto-Saving Actions
+
+### 1. Identify the Category
+- **Infrastructure**: Network, Servers, Clusters (`rules/cluster-workflows.mdc`)
+- **Code/Algo**: Models, Pipelines, Python (`rules/reco-pipeline.mdc`)
+- **Cursor/Tooling**: IDE bugs, Environment (`rules/cursor-troubleshooting.mdc`)
+
+### 2. Append to Log
+If no specific rule exists, add the lesson to `lessons/troubleshooting-log.md` in the `cursor-context` repo.
+
+**Chronology**: The log is ordered **newest first** (latest `## [YYYY-MM-DD]` section at the top, oldest at the bottom). Insert each new section **immediately after the intro paragraph** under the file title, not at the end of the file.
+
+**Format:**
+```markdown
+## [YYYY-MM-DD] Issue Title
+- **Problem**: Brief description.
+- **Root Cause**: Why it happened.
+- **Solution**: The command or fix applied.
+- **Artifacts**: Paths to logs or files.
+```
+
+### 3. Create/Update Rule
+If the knowledge is **permanent** (e.g., a new IP address or a strict coding standard), do **NOT** just log it. **Update the relevant `.mdc` rule file** immediately.
+
+- **Check**: Does a rule exist in `rules/*.mdc`?
+- **Update**: Add the new fact.
+- **Create**: If new domain, create `rules/new-domain.mdc` and link in README.
+
+## 🚀 Goal
+**Zero Amnesia**. Future agents must not repeat the same investigation. If you found it, save it.

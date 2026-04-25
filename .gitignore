@@ -1,0 +1,28 @@
+# Local env
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+
+# Secrets & credential dumps (never push)
+**/secrets/
+microservices/cursor-context-main/credentials.md
+
+# IDE / OS
+.idea/
+.vscode/
+Thumbs.db
+.DS_Store

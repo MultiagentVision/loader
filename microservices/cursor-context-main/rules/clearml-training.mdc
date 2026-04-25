@@ -1,0 +1,254 @@
+---
+description: ClearML training — bs3 primary worker (RTX 5070 Ti), gpu_bs3 queues, Vera pipeline, MinIO Tailscale, pitfalls
+globs: "**/train_*clearml*.py, **/train_boards*.py, **/pipeline.py, **/model_train/**"
+---
+
+# ClearML Training on GPU Runners
+
+## Primary worker: **bs3** (current focus)
+
+**Treat bs3 as the only ClearML GPU target for now.** It has the **fastest GPU** in the fleet (RTX 5070 Ti, 16 GB VRAM). Docs, `.env` examples, and pipeline enqueueing should assume **`gpu_bs3`** until multi-host tuning is intentional.
+
+| Item | Value |
+|------|--------|
+| **Host** | bs3 (Tailscale / MagicDNS) |
+| **ClearML queue** | `gpu_bs3` |
+| **GPU** | NVIDIA RTX 5070 Ti, 16 GB VRAM |
+| **Worker label** | `bs3:gpu0` (see agent logs) |
+| **SSH (ops)** | `ssh root@100.98.15.96` (Tailscale; use your allowed user if policy differs) |
+| **Systemd agent** | `clearml-agent-gpu.service` |
+| **MinIO S3 API** | Same tailnet: `bs3:9000` → use `http://bs3:9000` / `MINIO_ENDPOINT=bs3:9000` (not `s3.multiagent.vision`) |
+| **Co-located** | MinIO and ClearML agent on bs3 keeps dataset I/O and training on the fast GPU without crossing the public edge |
+
+### Standard: run the whole pipeline on bs3
+
+Set **all** pipeline queues to `gpu_bs3` in `model_train/.env` so controller, data prep, train, export, and report execute on the same worker:
+
+```bash
+PIPELINE_EXECUTION_QUEUE=gpu_bs3
+PIPELINE_DATA_PREP_QUEUE=gpu_bs3
+PIPELINE_MODEL_TRAIN_QUEUE=gpu_bs3
+PIPELINE_EXPORT_TEST_QUEUE=gpu_bs3
+PIPELINE_REPORT_QUEUE=gpu_bs3
+```
+
+Single-task scripts (e.g. `train_boards_clearml.py`) should use `execute_remotely(queue_name="gpu_bs3", ...)`.
+
+**Later:** Spread steps across bs2 / rg* (Vera’s defaults in `pipeline.py` use `gpu_bs2`, `gpu_rg1`, etc.). That is **out of scope** until you explicitly want load distribution; update env vars and re-test MinIO reachability from each host.
+
+### Other ClearML workers (deferred)
+
+| Host | Queue | GPU | VRAM | Notes |
+|------|-------|-----|------|-------|
+| bs2  | `gpu_bs2` | RTX 4060 | 8 GB | Ubuntu; no PVE DNS quirk |
+| bs1  | `gpu_bs1` | RTX 3050 | 6 GB | PVE |
+| rg1  | `gpu_rg1_1080ti` | GTX 1080 Ti | 11 GB | PVE |
+| rg2  | `gpu_rg2_1080ti` | GTX 1080 Ti | 11 GB | PVE |
+| rg3  | `gpu_rg3_3070` | RTX 3070 | 8 GB | PVE |
+
+All queues also listen on `default`. **Do not rely on these for primary boards training until bs3 is saturated and routing is documented.**
+
+## Preferred: Vera's Pipeline (`model_train/src/pipeline.py`)
+
+**This is the canonical way to run boards training.** Vera built a proper 4-step ClearML PipelineController in `chessverse-monorepo/microservices/train/model_train/`.
+
+### Location
+Branch: `feature/model-train-yolo26n`
+Directory: `microservices/train/model_train/`
+
+The directory has been checked out to the main working branch — it lives at `microservices/train/model_train/` on `feat/train-video-splitter-service` too (via `git checkout remotes/origin/feature/model-train-yolo26n -- microservices/train/model_train/`).
+
+### Pipeline steps and queues
+
+| Step | Queue env var | **Code default** (Vera) | **Recommended now (bs3-only)** |
+|------|---------------|-------------------------|--------------------------------|
+| Pipeline controller | `PIPELINE_EXECUTION_QUEUE` | `gpu_bs1` | `gpu_bs3` |
+| `data_prep` | `PIPELINE_DATA_PREP_QUEUE` | `gpu_bs2` | `gpu_bs3` |
+| `model_training` | `PIPELINE_MODEL_TRAIN_QUEUE` | `gpu_bs3` | `gpu_bs3` |
+| `export_and_test` | `PIPELINE_EXPORT_TEST_QUEUE` | `gpu_rg1` | `gpu_bs3` |
+| `generate_report` | `PIPELINE_REPORT_QUEUE` | `gpu_rg1_1080ti` | `gpu_bs3` |
+
+Override defaults only via `.env` (see “How to run” below). Changing code defaults to all-`gpu_bs3` is optional; env overrides are enough.
+
+### Dataset mappings
+`config/dataset_mappings.yaml` maps `TRIGGER_DATASET_NAME` → ClearML project, MinIO bucket, model name:
+- `chess-academia-boards` → ClearML project `Chess AI/chess-academia-boards`, model `yolo26n`, output `s3://chess-ai/models_train/boards/`, optional `s3_source_uri` for MinIO scan (must use a host that resolves on **every** runner — see Tailscale below)
+- `chess-corners` → `Chess AI/corners`
+- `chess-pieces` → `Chess AI/pieces`
+
+### MinIO / S3 from ClearML on bs3 (Tailscale)
+
+With **bs3-only** execution, step containers only need to reach MinIO on **bs3**. **`s3.multiagent.vision` must not be used** for `MINIO_ENDPOINT` / `AWS_ENDPOINT_URL`: it leaves the tailnet and breaks S3 API from agents.
+
+Use **MagicDNS** to MinIO on **bs3**:
+
+- `MINIO_ENDPOINT=bs3:9000`
+- `MINIO_SECURE=false` (typical LAN MinIO API on 9000)
+- `AWS_ENDPOINT_URL=http://bs3:9000` (same; boto3 / ClearML S3)
+
+`pipeline.py` passes `s3_source_uri` from YAML into `DataConfig/s3_custom_uri` (was previously always empty). Boards dataset uses `s3://bs3:9000/chess-academia-boards-yolo/` so `add_external_files` targets the same endpoint.
+
+ClearML step containers clone **`feat/train-video-splitter-service`** by default (where `model_train` and MinIO fixes live). Override with env **`PIPELINE_GIT_BRANCH`** after merging to `main`.
+
+### How to run (boards on bs3)
+
+```bash
+cd microservices/train/model_train
+
+# Create .env (first time only — never commit it):
+cat > .env << 'EOF'
+MINIO_ENDPOINT=bs3:9000
+MINIO_ACCESS_KEY=admin
+MINIO_SECRET_KEY=8cAITShdkYqHuUkxMzH79upw9VZweoxk
+MINIO_SECURE=false
+AWS_ACCESS_KEY_ID=admin
+AWS_SECRET_ACCESS_KEY=8cAITShdkYqHuUkxMzH79upw9VZweoxk
+AWS_ENDPOINT_URL=http://bs3:9000
+AWS_DEFAULT_REGION=us-east-1
+CLEARML_WEB_HOST=https://clearml.multiagent.vision
+CLEARML_API_HOST=https://clearml.multiagent.vision/api
+CLEARML_FILES_HOST=https://clearml.multiagent.vision/files
+CLEARML_API_ACCESS_KEY=EG0IGVUAY8RDPSRUJ5TSMINF6ADP4O
+CLEARML_API_SECRET_KEY=b0PNCU1sDrU9Z66_AmdXZ8oUlVMq9Vp1vypUiwsSgqXkzysGcMpmjx5rVnRAu39Ioak
+CF_ACCESS_CLIENT_ID=31ac6b5b8358a3b78703ba425a5eab14.access
+CF_ACCESS_CLIENT_SECRET=f739f3dc336681b46781f668c6d127462450d11d06c9a486828638909b59d5ed
+# Route all steps to bs3 (override defaults):
+PIPELINE_EXECUTION_QUEUE=gpu_bs3
+PIPELINE_DATA_PREP_QUEUE=gpu_bs3
+PIPELINE_MODEL_TRAIN_QUEUE=gpu_bs3
+PIPELINE_EXPORT_TEST_QUEUE=gpu_bs3
+PIPELINE_REPORT_QUEUE=gpu_bs3
+EOF
+
+# Install deps (one-time):
+uv sync
+
+# Run:
+TRIGGER_DATASET_NAME=chess-academia-boards PYTHONPATH=. uv run src/pipeline.py
+```
+
+The local process enqueues itself and exits immediately; the ClearML agent on bs3 picks it up.
+
+### Why this works (Cloudflare Zero Trust)
+
+`src/utils/cf_patch.py` monkey-patches `requests.Session.send` to inject `CF-Access-Client-Id` and `CF-Access-Client-Secret` headers on every request. This means **you can use the public `https://clearml.multiagent.vision` URL** — no need for Tailscale IP.
+
+CF credentials are hardcoded as defaults in `cf_patch.py` (and also in `.env`):
+- `CF_ACCESS_CLIENT_ID=31ac6b5b8358a3b78703ba425a5eab14.access`
+- `CF_ACCESS_CLIENT_SECRET=f739f3dc336681b46781f668c6d127462450d11d06c9a486828638909b59d5ed`
+
+---
+
+## Legacy: Simple single-task script
+
+`chessverse-monorepo/packages/coaching/train-app/python/train_boards_clearml.py`
+
+- ClearML project: `chess-academia`, task: `train-boards-yolo11n`
+- Downloads from Roboflow (workspace `chessacademiaboards-oafl9`), trains `yolo11n.pt`, 300 epochs
+- **Requires Tailscale IP** (no CF patch): `CLEARML_API_HOST=http://100.114.215.51:8008`
+
+Prefer Vera's pipeline for new training runs.
+
+---
+
+## Monitor
+
+```bash
+# ClearML UI
+open https://clearml.multiagent.vision
+
+# SSH + watch GPU
+ssh root@100.98.15.96 "watch -n5 nvidia-smi"
+
+# Agent logs on bs3
+ssh root@100.98.15.96 "journalctl -u clearml-agent-gpu.service -f"
+
+# Docker container logs (while running)
+ssh root@100.98.15.96 "docker ps --format '{{.Names}}' | grep -v gpu-inference | xargs docker logs -f"
+```
+
+## Common Pitfalls
+
+### 1. Public ClearML URL blocked by Cloudflare (legacy scripts only)
+**Symptom**: `ValueError: It seems *api_server* is misconfigured. Is this the ClearML API server https://clearml.multiagent.vision/api ?`
+**Fix**: Either use Vera's pipeline (has `cf_patch.py` built-in), or use internal URL `http://100.114.215.51:8008`.
+
+### 2. Every task re-downloads from the internet (apt / pip / Miniconda / CUDA wheels)
+**Why**: Each ClearML step is a **fresh container**. The agent injects a bootstrap (`apt-get`, `pip install -U clearml-agent`, sometimes **Miniconda + conda install git**). Host bind mounts (`/root/.clearml/pip-cache`, `vcs-cache`, `venvs-cache`) speed **pip** and **git clone** but do **not** remove `apt-get update` or a redundant Miniconda install if `extra_docker_shell_script` still runs it.
+
+**Best practices (all applied on bs3)**:
+1. **Light bootstrap** — `clearml_light_docker_bootstrap=true` in `infra/ansible/inventory/clearml-runners.ini`. `extra_docker_shell_script` reduced to a single `git config --global url...` line (no Miniconda, no apt). Applied directly to `/root/clearml.conf` on bs3.
+2. **Pre-baked step image with full requirements** — `chessverse-monorepo/microservices/train/model_train/docker/Dockerfile.clearml-runner` extends `ultralytics/ultralytics:8.4.30` with git, clearml-agent, boto3, apt libs, AND **the full `requirements.txt`** pre-installed. Build from `model_train/` directory. Pushed to **internal Harbor** `registry.multiagent.vision/clearml/clearml-yolo-runner:8.4.30` (LAN access — no Cloudflare headers needed for Docker daemon). Set `PIPELINE_STEP_DOCKER_IMAGE=registry.multiagent.vision/clearml/clearml-yolo-runner:8.4.30` in `model_train/.env`.
+3. **`--system-site-packages` venv** — `venv_params: ["--system-site-packages"]` in `clearml.conf` `package_manager` block (also in Ansible template). This makes the ClearML-managed venv inherit the image's system Python packages. When packages match requirements.txt exactly (they do — same file baked in), pip installs become near-zero. Without this, pip tries to "uninstall then reinstall" all packages even when versions match, producing `Can't uninstall 'X'... outside environment` noise and wasting time.
+4. **Harbor Docker Hub pull-through proxy** — `docker-proxy` project in Harbor (`registry.multiagent.vision/docker-proxy/<image>`). bs3 Docker daemon configured with `registry-mirrors: ["https://registry.multiagent.vision/v2/docker-proxy"]`. Subsequent pulls of `ultralytics/*`, `nvidia/*` etc. go to LAN Harbor instead of Docker Hub.
+5. **Harbor CA cert** — installed at `/etc/docker/certs.d/registry.multiagent.vision/ca.crt` on bs3. `/etc/hosts`: `10.0.0.202 registry.multiagent.vision`. Use the **root CA** from Harbor’s `GET /api/v2.0/systeminfo/getcert` (not the TLS leaf from a blind `openssl s_client` pipe). After a Harbor **Helm/Argo** rollout, refresh that file and restart Docker if `docker push` reports `unknown authority`.
+6. **Harbor large pushes (GB layers)** — If nginx logs show **408** on `PATCH /v2/.../blobs/uploads/` or heavy `client request body is buffered to a temporary file`, set `nginx.ingress.kubernetes.io/proxy-request-buffering: "off"` on the Harbor ingress and **commit it in GitOps** so it survives sync. Ensure the **worker node** disk (registry storage) has enough free space; expand the VM disk + grow partition/filesystem if needed.
+
+**Harbor robot account** (for push from bs3): `robot$clearml-runner` / `ACPAbub3W2l09Jp4fg25VC1bedk5SYLD` (stored in `/root/harbor-clearml.env` on bs3).
+
+### 3. Image pull delay (~5 min on first run)
+**Symptom**: `docker ps` shows no container for several minutes after agent picks up task.
+**Cause**: `ultralytics/ultralytics:latest` or `nvidia/cuda:*` not cached; 1–3 GB pull.
+**Fix**: Wait. Check `journalctl -u clearml-agent-gpu.service -n 5` to confirm docker run started.
+
+### 4. Expired GitHub PAT — git clone fails
+**Symptom**: `remote: Invalid username or token. Password authentication is not supported for Git operations.`
+**Fix**: Rotate PAT in Vault:
+```bash
+kubectl exec -n vault vault-0 -- \
+  env VAULT_TOKEN="$(kubectl get secret vault-token -n external-secrets \
+    -o jsonpath='{.data.token}' | base64 -d)" \
+  vault kv patch secret/jenkins/github clearml_github_pat=<NEW_PAT>
+
+# Re-deploy all runners:
+export GITHUB_PAT=<NEW_PAT>
+ansible-playbook -i ansible/inventory/clearml-runners.ini \
+  ansible/playbooks/deploy-clearml-agents.yml \
+  -e clearml_conf_path=/tmp/clearml-bs3.conf
+```
+PAT lives at: `secret/jenkins/github → clearml_github_pat` (same Vault path as Jenkins `token` and `mvat_github_pat`).
+
+### 5. Fooocus eating VRAM on bs3
+**Symptom**: Training OOMs or `nvidia-smi` shows >2 GB used by `python entry_with_update.py`.
+**Fix**: `ssh root@100.98.15.96 "systemctl stop fooocus"` (and `disable` if not needed).
+**Re-enable**: `systemctl enable --now fooocus` to bring it back after training.
+
+### 6. Task status "failed" after clone — check full log
+```bash
+# Open the task URL printed when enqueuing, or via ClearML UI
+open https://clearml.multiagent.vision
+```
+
+### 7. `uv` not installed
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+### 8. MinIO jobs use `s3.multiagent.vision` and fail on bs3
+**Symptom**: data prep or S3 steps fail with timeouts, HTML errors, or unreachable host.
+**Cause**: Public S3 hostname is outside the Tailscale contour; bs3 agents should use **MagicDNS** MinIO (`bs3:9000` + `http://bs3:9000` as `AWS_ENDPOINT_URL`).
+**Fix**: Update `microservices/train/model_train/.env` and ensure `dataset_mappings.yaml` `s3_source_uri` uses `s3://bs3:9000/...`. If you later run steps on rg*/bs2, confirm each host can resolve and reach that MinIO endpoint (may need a different internal host or path).
+
+### 8b. MinIO runs **inside Kubernetes**; ClearML agent runs on **Proxmox host**
+**Symptom**: `http://bs3:9000` or `host-gateway` probes fail; nothing listens on host `:9000`; `minio.minio.svc.cluster.local` unusable from host Docker.
+**Cause**: S3 API is only in-cluster unless exposed via **Ingress** (e.g. `https://s3.multiagent.vision`), **NodePort**, or **LoadBalancer** on an IP the host can reach. Host-level Docker cannot use cluster DNS.
+**Fix**: Point `AWS_ENDPOINT_URL` / `dataset_mappings.yaml` at the **reachable** URL (see `gitops/apps/infra/minio/ACCESS.md`). On the host, validate with **`examples/bs3-clearml-host-to-k8s-minio/docker-s3-probe.sh`** in this repo. Set `PIPELINE_DOCKER_ADD_HOST_BS3=0` when not using a host-local MinIO. If the ingress is behind Cloudflare Access, ensure S3 clients send `CF-Access-*` headers or use a path that bypasses them.
+
+### 9. Pipeline installs parent `requirements.txt` and dies on Python 3.12
+**Symptom**: `pip install` fails building `numpy==1.23.5` or `AttributeError: pkgutil.ImpImporter` during setuptools in the venv.
+**Cause**: ClearML agent walks **up** from `working_dir` (`model_train/`) and installs the first `microservices/train/requirements.txt` it finds (TF + legacy numpy), even if `set_packages` points at `model_train/requirements.txt`.
+**Fix**: Do **not** keep a file named `requirements.txt` at `microservices/train/`; rename to e.g. `requirements-evaluation.txt` and `COPY` that in the train `Dockerfile`. Also keep `PipelineController(packages=...)` + `task.set_packages(model_train/requirements.txt)` in `pipeline.py`.
+
+### 10. Harbor push: 408/502 on large layers or TLS errors after redeploy
+**Symptom**: `docker push` retries multi‑GB layers; nginx **408** on PATCH; or **502** / connection reset from upstream; or `x509: certificate signed by unknown authority` right after upgrading/syncing Harbor.
+**Cause**: Ingress buffers entire layer uploads; timeouts; or new `harbor-ca` after redeploy while Docker still trusts the old file.
+**Fix**: See pitfall **#2** items **5–6** (CA from `getcert`, `proxy-request-buffering: off`, disk space on registry worker). Details: `lessons/troubleshooting-log.md` → same‑date Harbor large‑push entry.
+
+## GitHub PAT — Vault Storage
+
+PAT for git clone inside agent Docker containers:
+- **Vault path**: `secret/jenkins/github`, key `clearml_github_pat`
+- **Same KV path** as Jenkins `token` and `mvat_github_pat`
+- **Read**: `kubectl exec -n vault vault-0 -- env VAULT_TOKEN="$(kubectl get secret vault-token -n external-secrets -o jsonpath='{.data.token}' | base64 -d)" vault kv get -field=clearml_github_pat secret/jenkins/github`
+- **Full rotation + deploy procedure**: see `infra/.cursor/rules/clearml-agents-infra.mdc` → "GitHub PAT for Agent Git Clone (Vault-backed)"

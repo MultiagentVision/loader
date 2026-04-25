@@ -1,0 +1,138 @@
+# -----------------------------------------------------------------------------
+# CI: Train (incl. autolabel) — pytest then trigger Jenkins (Kaniko → registry)
+# Same pattern as ci-bff-mock.yml, plus a fast-gate unit test job before deploy.
+# -----------------------------------------------------------------------------
+name: CI - Train
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "microservices/train/**"
+      - ".github/workflows/ci-train.yml"
+  workflow_dispatch:
+
+jobs:
+  train-pytest:
+    name: Train pytest (MinIO webhook)
+    if: ${{ github.event_name != 'push' || !contains(github.event.head_commit.message, '[gha-manifest-only]') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: microservices/train
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: microservices/train/requirements-evaluation.txt
+
+      - name: Install dependencies (match train Dockerfile)
+        run: |
+          pip install --upgrade pip
+          pip install --no-cache-dir -r requirements-evaluation.txt gunicorn==21.2.0
+          pip install --no-cache-dir \
+            "tensorflowjs>=3.19.0,<3.20.0" \
+            "tfjs-graph-converter>=1.6.0" \
+            --no-deps
+
+      - name: Pytest MinIO split webhook
+        run: python -m pytest tests/test_minio_split_webhook.py -q
+
+  trigger-jenkins:
+    name: Trigger Jenkins deploy
+    needs: train-pytest
+    if: ${{ github.event_name != 'push' || !contains(github.event.head_commit.message, '[gha-manifest-only]') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Validate Jenkins secrets
+        run: |
+          test -n "${{ secrets.CF_ACCESS_CLIENT_ID }}"
+          test -n "${{ secrets.CF_ACCESS_CLIENT_SECRET }}"
+          test -n "${{ secrets.JENKINS_USER }}"
+          test -n "${{ secrets.JENKINS_API_TOKEN }}"
+
+      - name: Get Jenkins crumb
+        id: crumb
+        env:
+          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+          JENKINS_USER: ${{ secrets.JENKINS_USER }}
+          JENKINS_API_TOKEN: ${{ secrets.JENKINS_API_TOKEN }}
+        run: |
+          curl -sS -D /tmp/crumb_headers.txt -o /tmp/crumb_body.txt \
+            "https://jenkins.multiagent.vision/crumbIssuer/api/json" \
+            -H "CF-Access-Client-Id: ${CF_ACCESS_CLIENT_ID}" \
+            -H "CF-Access-Client-Secret: ${CF_ACCESS_CLIENT_SECRET}" \
+            --user "${JENKINS_USER}:${JENKINS_API_TOKEN}"
+
+          STATUS_CODE="$(awk 'toupper($1) ~ /^HTTP/ {code=$2} END {print code}' /tmp/crumb_headers.txt)"
+          LOCATION_HEADER="$(awk 'BEGIN{IGNORECASE=1} /^location:/ {print $2}' /tmp/crumb_headers.txt | tr -d '\r' | tail -1)"
+
+          if [ "${STATUS_CODE}" = "302" ] && echo "${LOCATION_HEADER}" | grep -q "cdn-cgi/access/login"; then
+            echo "Cloudflare Access rejected service credentials while requesting Jenkins crumb."
+            cat /tmp/crumb_headers.txt
+            exit 1
+          fi
+
+          if [ "${STATUS_CODE}" != "200" ]; then
+            echo "Unexpected Jenkins crumb status: ${STATUS_CODE}"
+            cat /tmp/crumb_headers.txt
+            cat /tmp/crumb_body.txt
+            exit 1
+          fi
+
+          CRUMB="$(python3 -c 'import json,sys; print(json.loads(sys.stdin.read())["crumb"])' < /tmp/crumb_body.txt)"
+          if [ -z "${CRUMB}" ]; then
+            echo "Failed to get Jenkins crumb"
+            cat /tmp/crumb_headers.txt
+            cat /tmp/crumb_body.txt
+            exit 1
+          fi
+          echo "value=${CRUMB}" >> "$GITHUB_OUTPUT"
+
+      - name: Trigger chessverse-monorepo Jenkins job (SERVICE=train)
+        env:
+          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+          JENKINS_USER: ${{ secrets.JENKINS_USER }}
+          JENKINS_API_TOKEN: ${{ secrets.JENKINS_API_TOKEN }}
+          JENKINS_CRUMB: ${{ steps.crumb.outputs.value }}
+        run: |
+          curl -sS -D /tmp/jenkins_headers.txt -o /tmp/jenkins_body.txt \
+            -X POST "https://jenkins.multiagent.vision/job/chessverse-monorepo/job/main/buildWithParameters?SERVICE=train" \
+            -H "CF-Access-Client-Id: ${CF_ACCESS_CLIENT_ID}" \
+            -H "CF-Access-Client-Secret: ${CF_ACCESS_CLIENT_SECRET}" \
+            -H "Jenkins-Crumb: ${JENKINS_CRUMB}" \
+            --user "${JENKINS_USER}:${JENKINS_API_TOKEN}"
+
+          STATUS_CODE="$(awk 'toupper($1) ~ /^HTTP/ {code=$2} END {print code}' /tmp/jenkins_headers.txt)"
+          LOCATION_HEADER="$(awk 'BEGIN{IGNORECASE=1} /^location:/ {print $2}' /tmp/jenkins_headers.txt | tr -d '\r' | tail -1)"
+
+          if [ "${STATUS_CODE}" = "302" ] && echo "${LOCATION_HEADER}" | grep -q "cdn-cgi/access/login"; then
+            echo "Cloudflare Access rejected service credentials."
+            cat /tmp/jenkins_headers.txt
+            exit 1
+          fi
+
+          if [ "${STATUS_CODE}" != "201" ] && [ "${STATUS_CODE}" != "302" ]; then
+            echo "Unexpected Jenkins trigger status: ${STATUS_CODE}"
+            cat /tmp/jenkins_headers.txt
+            cat /tmp/jenkins_body.txt
+            exit 1
+          fi
+
+      - name: Jenkins trigger summary
+        run: |
+          echo "### Jenkins train build queued" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Kaniko push → **registry.multiagent.vision/chessverse/train**; on \`main\`, Jenkins updates \`deploy/metadata.yaml\` for Argo." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Job: https://jenkins.multiagent.vision/job/chessverse-monorepo/job/main/" >> $GITHUB_STEP_SUMMARY

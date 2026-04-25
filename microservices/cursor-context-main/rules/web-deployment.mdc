@@ -1,0 +1,11 @@
+---
+description: Workflows for Next.js frontend deployments to Cloudflare Pages via GitHub Actions.
+globs: .github/workflows/*.yml, next.config.ts, wrangler.toml, *.pages.dev
+---
+# Web Deployment
+
+- **Next.js + Cloudflare Pages**: We deploy static Next.js sites (`output: "export"`) to Cloudflare Pages.
+- **GitHub Actions**: Automated deployments run on `push` to `main` via `cloudflare/pages-action`.
+- **Custom Domains**: Managed in the Cloudflare Dashboard (DNS CNAME to `.pages.dev`).
+- **Media Assets**: Heavy media (like `.mp4` videos) are NOT bundled in the repo. They are served from `media.multiagent.vision`. We inject `NEXT_PUBLIC_MEDIA_BASE_URL=https://media.multiagent.vision` during the GitHub Action build step so Next.js components load them correctly without attempting to resolve them locally.
+- **Contact Forms**: We use **Web3Forms** for form submissions on static exports without needing a backend API. The access key is injected via the `NEXT_PUBLIC_WEB3FORMS_ACCESS_KEY` GitHub Action secret. Emails are sent to `admin@multiagent.vision`, which is handled by Cloudflare Email Routing to forward to personal inboxes.

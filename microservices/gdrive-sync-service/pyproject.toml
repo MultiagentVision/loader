@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gdrive-sync-service"
+version = "0.1.0"
+description = "Google Drive → MinIO video sync microservice"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.109",
+  "uvicorn[standard]>=0.27",
+  "sqlalchemy[asyncio]>=2.0.25",
+  "asyncpg>=0.29",
+  "alembic>=1.13",
+  "pydantic-settings>=2.1",
+  "celery[redis]>=5.3",
+  "redis>=5.0",
+  "minio>=7.2",
+  "google-api-python-client>=2.115",
+  "google-auth>=2.27",
+  "google-auth-httplib2>=0.2",
+  "PyYAML>=6.0",
+  "httpx>=0.26",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "pytest-asyncio>=0.23",
+  "pytest-cov>=4.1",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+markers = [
+  "unit: fast unit tests",
+  "integration: requires postgres/redis/minio or docker",
+]
+testpaths = ["tests"]
+
+[tool.coverage.run]
+branch = true
+source = ["app"]

@@ -1,0 +1,39 @@
+---
+description: Camera network configuration, NVR details, RTSP URLs, and stream mapping for Beersheba (BS) and Ramat Gan (RG) sites
+globs: **/*.py, **/*.json, **/*.yaml
+---
+
+# Camera Network & NVR Configuration
+
+## 🏢 Beersheba (BS) Site
+- **Subnet**: `10.0.0.0/24`
+- **NVR1**: `10.0.0.16` (User: `chessb7`, Pass: `Chess2510!`)
+- **NVR2**: `10.0.0.2` (User: `farc`, Pass: `Chess2510!`)
+- **Stream**: 4K H.265 (Main), 480p (Sub)
+
+### RTSP Pattern
+```text
+rtsp://<user>:<pass>@<ip>:554/user=<user>&password=<pass>&channel=<CH>&stream=0.sdp
+```
+
+## 🏢 Ramat Gan (RG) Site
+- **Subnet**: `10.100.102.0/24`
+- **NVR**: `10.100.102.110` (ASECAM)
+- **Credentials**: User `chessrg`, Pass `Chess2511!`
+- **Active Channels**: 1-22 (22 cameras)
+- **Resolution**: 21x 4K (3840x2160), 1x 2K (Ch 11)
+
+### RG Channel Mapping
+| Ch | Res | Ch | Res |
+|---|---|---|---|
+| 1-10 | 4K | 12-22 | 4K |
+| 11 | 2K | | |
+
+## 🛠️ Usage in Code
+- **FFmpeg**: Use `-rtsp_transport tcp` to avoid packet drop.
+- **OpenCV**: `cv2.VideoCapture(url, cv2.CAP_FFMPEG)`
+- **Latency**: Expect 500ms-2s latency on RTSP.
+
+## ⚠️ Troubleshooting
+- **Black Screen**: Check if `ffplay` works locally. H.265 requires modern decoders.
+- **Connection Refused**: Verify VPN/Tailscale. RG NVR needs subnet routing from `rg1/rg2/rg3`.

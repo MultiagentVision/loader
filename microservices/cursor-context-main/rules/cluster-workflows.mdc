@@ -1,0 +1,67 @@
+---
+description: Best practices and workflows for using the BGU University Cluster (SLURM) and YOLO training
+globs: **/*.sbatch, **/*.py, **/*.sh
+---
+
+# BGU Cluster & Training Workflows
+
+## 🚀 Connection & Access
+- **Jump Host**: `ssh bgu-lab` (132.72.47.194)
+- **Cluster**: `ssh bgu-slurm` (slurm.bgu.ac.il)
+- **Requirement**: BGU VPN must be active.
+- **Git Identity**: Use `github.com-andreyl` alias for `aichess-games` repos.
+
+## ⚠️ Common Pitfalls (Lessons Learned)
+
+### 1. Job History is Hidden by Default
+`sacct` only shows jobs from the current day.
+**Fix**: Always use `-S <date>` to find past jobs.
+```bash
+sacct -u andreyl -S 2025-01-01 --format=JobID,JobName,State,Start,End,ExitCode
+```
+
+### 2. YOLO Output Paths are Nested
+Ultralytics YOLO training often creates deeper directory structures than expected.
+- **Expected**: `runs/pieces/experiment_name/weights/best.pt`
+- **Actual**: `runs/detect/runs/pieces/experiment_name/weights/best.pt`
+**Fix**: Always check the training log (`tail -n 50 slurm_logs/*.out`) to find the line `Results saved to ...`. Do not assume the path.
+
+### 3. Model Validation
+Files named `yolo26_pieces.pt` are not guaranteed to be working.
+**Fix**: Always check the model's `train_metrics` before deploying.
+```python
+# Validation snippet
+from ultralytics import YOLO
+m = YOLO('path/to/model.pt')
+print(m.ckpt['train_metrics']['metrics/mAP50(B)']) # Should be > 0.9
+```
+
+## 📋 Standard Procedures
+
+### Training on SLURM
+1. **Prepare Data**: Ensure `data.yaml` uses absolute paths or paths relative to the training script.
+2. **Submit**: `sbatch slurm/train_job.sbatch`
+3. **Monitor**: `tail -f slurm_logs/train_job-*.out`
+4. **Verify**: Check `ExitCode` in `sacct` is `0:0`.
+
+### Deploying a New Model
+1. **Locate**: Find the actual `best.pt` from logs.
+2. **Validate**: Run validation snippet (above).
+3. **Download**: `scp bgu-slurm:/path/to/best.pt ./models/local_name.pt`
+4. **Update**: Update `live_recognition_server.py` or config to point to new model.
+
+## ClearML Agents (RG/BS)
+
+**Primary training worker:** **bs3** (`gpu_bs3`, RTX 5070 Ti 16 GB) — use this queue for boards/YOLO pipelines until you deliberately spread load. See `rules/clearml-training.mdc` for Tailscale MinIO (`bs3:9000`), `.env` queue vars, SSH, and pitfalls.
+
+Other hosts: rg1/rg2/rg3, bs1, bs2 (queues `gpu_rg*`, `gpu_bs1`, `gpu_bs2`). Full agent infra: `infra/.cursor/rules/clearml-agents-infra.mdc`.
+
+### PVE Kernel DNS Bug (getaddrinfo)
+**Symptom**: `fatal: unable to access 'https://github.com/...': getaddrinfo() thread failed to start` when tasks run in Docker.
+**Affects**: rg1, rg2, rg3, bs1, bs3 (PVE kernel 6.14.x). **Not** bs2 (Ubuntu).
+**Fix**: (1) Add `"dns": ["8.8.8.8", "8.8.4.4"]` to `/etc/docker/daemon.json`; (2) In clearml.conf `agent.extra_docker_shell_script`, install Miniconda + conda git, symlink to `/usr/bin/git`. Applied by `deploy-clearml-agents.yml`.
+
+### PVE dpkg Stuck — nvidia-kernel-dkms for Removed Kernel
+**Symptom**: `dpkg --configure -a` stuck; `nvidia-kernel-dkms` fails for kernel 6.17.x (NVIDIA 550 driver incompatible).
+**Root Cause**: Kernel removed (rc) but headers remained; DKMS still tries to build for `/lib/modules/6.17.x-1-pve`.
+**Fix**: (1) `apt-get remove proxmox-kernel-6.17.2-1-pve-signed proxmox-kernel-6.17`; (2) `apt-get remove proxmox-headers-6.17.2-1-pve proxmox-headers-6.17`; (3) `dpkg --configure -a`. See `infra/scripts/fix-rg1-dpkg-kernel6.17.sh`.

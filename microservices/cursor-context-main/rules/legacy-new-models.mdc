@@ -1,0 +1,110 @@
+---
+description: How to add new TF.js models to legacy-recognition
+globs: legacy-recognition/**/loadModels*, legacy-recognition/public/*
+---
+
+# Adding New Models to Legacy-Recognition
+
+Legacy runs in the browser and uses **TensorFlow.js** only. PyTorch models (YOLO26, RecoAlgo) must be converted to TF.js first.
+
+## Requirements
+
+| Requirement | Current Value | Notes |
+|-------------|---------------|-------|
+| Format | TF.js GraphModel | `model.json` + `group1-shard1ofN.bin` |
+| Input name | `"x"` | Placeholder node name |
+| Input shape | `[1, 960, 1088, 3]` NHWC | Set in `constants.tsx` |
+| Output | Tensor3D `[batch, N, 4+12]` | xc, yc, w, h + 12 class scores |
+| Labels | `b,k,n,p,q,r,B,K,N,P,Q,R` | 12 classes, lowercase=black |
+
+## Option 1: YOLO26 PyTorch → TF.js
+
+```bash
+# From algo or RecoAlgo directory
+pip install ultralytics
+yolo export model=algo/models/yolo26_pieces.pt format=tfjs imgsz=960,1088 half=True
+# Creates yolo26_pieces_web_model/
+```
+
+Then:
+1. Copy `yolo26_pieces_web_model/` → `legacy-recognition/public/yolo26_pieces_tfjs/`
+2. Update `loadModels.tsx` to load `"yolo26_pieces_tfjs/model.json"` instead of `"480M_pieces_float16/model.json"`
+3. **Output format**: Ultralytics TF.js export may produce different output structure. Check `findPieces.tsx` / `detect.tsx` — `getBoxesAndScores` expects `[xc, yc, w, h, score_b, score_k, ..., score_R]`. If Ultralytics outputs `[x1,y1,x2,y2,conf,class_id]` or similar, you must adapt `getBoxesAndScores` or add a post-processing layer.
+
+## Option 2: Replace with Same-Format TF.js Models
+
+If you have TF.js models that match the current format (e.g. from another YOLO export with compatible output):
+
+1. **Copy** the model folder to `legacy-recognition/public/<folder_name>/`
+2. Ensure `model.json` references shards that exist (e.g. `group1-shard1of3.bin`)
+3. **Update** `loadModels.tsx`:
+   ```ts
+   const piecesModel = await loadGraphModel("<folder_name>/model.json");
+   ```
+4. **Update** `constants.tsx` if input size differs:
+   ```ts
+   export const MODEL_HEIGHT = 960;  // or new height
+   export const MODEL_WIDTH = 1088;  // or new width
+   ```
+
+## Option 3: RecoAlgo (PyTorch) → TF.js
+
+RecoAlgo uses ConvNeXt (empty + piece classifiers), not YOLO. Converting to TF.js requires:
+1. Export PyTorch → ONNX
+2. Convert ONNX → TF SavedModel
+3. Convert SavedModel → TF.js GraphModel
+
+This is more involved. Prefer using the **algo video tracker** (server-side) for RecoAlgo models.
+
+## Option 4: Call GPU Endpoints (Preferred for New Models)
+
+Instead of TF.js in the browser, legacy can call GPU-backed services. No model conversion needed.
+
+### Algo Video Tracker (Full Pipeline)
+
+| Endpoint | Purpose |
+|---------|---------|
+| `http://localhost:8765/video` | Video tracker UI (use directly or embed) |
+| `POST /api/video/open` | Open video; body: `{ path, orientation, start_fen, board_index }` |
+| `POST /api/video/calibrate` | Calibrate boards from current frame |
+| `POST /api/video/step` | Advance one frame, run YOLO26 + RecoAlgo pipeline |
+| `POST /api/video/play` | Auto-step until move or max_steps |
+| `GET /api/video/pgn?board_id=N` | Export PGN for board N |
+
+**Run:** `cd algo && .venv/bin/python live_recognition_server.py` → port 8765. Models (YOLO26, RecoAlgo) live on server; use `cursor-context/models/` or `algo/models/`.
+
+### Algo Cameras API (RTSP / Live)
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /api/cameras` | List cameras |
+| `POST /api/cameras/{camera_id}/capture` | Capture frame → `RecognitionResult` (FEN, pieces) |
+| `POST /api/cameras/{camera_id}/recalibrate` | Recalibrate |
+| `POST /api/cameras/{camera_id}/calibrate-position` | Calibrate starting position |
+
+### RecoAlgo K8s Service (if deployed)
+
+RecoAlgo may be deployed as `reco` service in `chessai-games` namespace. Check gitops for URL (e.g. `http://reco.chessai-games.svc` or public ingress).
+
+### Integrating Legacy with GPU Backend
+
+1. **Option A — Use algo UI directly:** Open `http://localhost:8765/video`, skip legacy TF.js.
+2. **Option B — Legacy as thin client:** Add env `VITE_ALGO_API=http://localhost:8765`; legacy fetches video list, opens via algo, calls step/play/pgn. Requires code changes in legacy to replace TF.js calls with `fetch()` to algo API.
+3. **Option C — Per-frame inference:** If a `/api/infer` or similar endpoint exists that accepts image → returns pieces/corners, legacy could POST canvas frames and use the response instead of TF.js.
+
+## File Locations
+
+| File | Purpose |
+|------|---------|
+| `src/utils/loadModels.tsx` | Model paths, warmup |
+| `src/utils/constants.tsx` | MODEL_HEIGHT, MODEL_WIDTH, LABELS |
+| `src/utils/detect.tsx` | getBoxesAndScores (output parsing) |
+| `public/<model_folder>/` | model.json + shards |
+
+## Verification
+
+After adding models:
+1. `yarn build && yarn start`
+2. Open `http://localhost:5173/upload`
+3. Load a video, click "Find Corners", then play
+4. Check browser console for TF.js errors (shape mismatch, missing shards)

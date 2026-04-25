@@ -1,0 +1,9 @@
+# Secrets — never commit credentials
+secrets/
+
+# Wrangler (Cloudflare) local state
+.wrangler/
+
+# RAG local env and index data
+rag/.venv/
+rag/.chroma/
