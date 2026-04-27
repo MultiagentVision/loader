@@ -1,4 +1,6 @@
-# Service account JSON must exist as Secret gdrive-sync-drive-sa (key rehovot-drive-sa.json).
+# Secret gdrive-sync-drive-sa must contain these keys (one JSON per city folder on Drive):
+#   rehovot-drive-sa.json, beer-sheva-drive-sa.json, ramat-gan-drive-sa.json
+# If a single service account can read all folders, duplicate the same file under each key when creating the Secret.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -14,3 +16,11 @@ data:
         folder_id: "1BJFbwCtGKcuo6B13Jae-S5QkIq6MkyT4"
         credentials_path: /secrets/rehovot-drive-sa.json
         object_prefix: video/Rehovot
+      - name: beer-sheva
+        folder_id: "1PE-xIIcoy7sh-57tHn7qSpw30umH23w7"
+        credentials_path: /secrets/beer-sheva-drive-sa.json
+        object_prefix: "video/Beer Sheva"
+      - name: ramat-gan
+        folder_id: "1aDfFcoxZZLpZbmWi98fltRbHJ1VFram9"
+        credentials_path: /secrets/ramat-gan-drive-sa.json
+        object_prefix: "video/Ramat Gan"
