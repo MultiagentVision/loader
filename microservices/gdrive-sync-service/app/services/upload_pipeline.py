@@ -21,6 +21,7 @@ from app.services.minio_client import MinioObjectStore
 from app.services.mime_utils import is_video_like
 from app.services.paths import build_object_key
 from app.services.drives_config import DriveConfig
+from app.services.video_validator import validate_video
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +77,24 @@ async def run_upload_for_file(
                         file_id,
                     )
                     return
+
+                if row.status == FileStatus.CORRUPTED.value:
+                    meta_check = await asyncio.to_thread(drive.get_file_metadata, file_id)
+                    if not checksum_changed_on_drive(row, incoming_checksum=meta_check.get("md5Checksum")):
+                        logger.info(
+                            "SKIP (CORRUPTED, unchanged): drive=%s file_id=%s",
+                            drive_name,
+                            file_id,
+                        )
+                        return
+                    logger.info(
+                        "CORRUPTED file changed on Drive, re-queuing: drive=%s file_id=%s",
+                        drive_name,
+                        file_id,
+                    )
+                    row.status = FileStatus.NEW.value
+                    row.updated_at = _utcnow()
+                    await session.flush()
 
                 meta = await asyncio.to_thread(drive.get_file_metadata, file_id)
                 mime = meta.get("mimeType") or ""
@@ -219,6 +238,42 @@ async def run_upload_for_file(
                     minio_path=canonical_path,
                 )
             logger.info("UPLOADED drive=%s file_id=%s key=%s", drive_name, file_id, canonical_path)
+
+            if settings.video_validation_enabled:
+                try:
+                    validation = await asyncio.to_thread(
+                        validate_video,
+                        store,
+                        canonical_path,
+                        file_size=size,
+                        settings=settings,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "video validation error (skipping): drive=%s file_id=%s err=%s",
+                        drive_name, file_id, exc,
+                    )
+                else:
+                    if not validation.ok:
+                        logger.warning(
+                            "CORRUPTED drive=%s file_id=%s reason=%s key=%s",
+                            drive_name, file_id, validation.reason, canonical_path,
+                        )
+                        async with session_maker() as vsession:
+                            async with vsession.begin():
+                                vrepo = FileRepository(vsession)
+                                vrow = await vrepo.lock_file_row(drive_name, file_id)
+                                if vrow is not None:
+                                    await vrepo.mark_corrupted(vrow, validation.reason or "validation failed")
+                    else:
+                        logger.info(
+                            "VALID drive=%s file_id=%s codec=%s dur=%s res=%dx%d var=%.1f",
+                            drive_name, file_id,
+                            validation.codec,
+                            f"{validation.duration_sec:.1f}s" if validation.duration_sec else "?",
+                            validation.width or 0, validation.height or 0,
+                            validation.variance or 0.0,
+                        )
     finally:
         await engine.dispose()
 
@@ -254,7 +309,7 @@ async def run_sync_for_drive(
                     row = await repo.get_by_drive_file(drive_cfg.name, file_id)
                     if (
                         row
-                        and row.status == FileStatus.UPLOADED.value
+                        and row.status in (FileStatus.UPLOADED.value, FileStatus.CORRUPTED.value)
                         and checksum_changed_on_drive(row, incoming_checksum=checksum)
                     ):
                         row.status = FileStatus.NEW.value

@@ -23,6 +23,7 @@ dependencies = [
   "google-auth-httplib2>=0.2",
   "PyYAML>=6.0",
   "httpx>=0.26",
+  "Pillow>=10.0",
 ]
 
 [project.optional-dependencies]

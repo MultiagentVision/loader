@@ -14,6 +14,7 @@ class FileStatus(str, enum.Enum):
     PROCESSING = "PROCESSING"
     UPLOADED = "UPLOADED"
     FAILED = "FAILED"
+    CORRUPTED = "CORRUPTED"
 
 
 class File(Base):

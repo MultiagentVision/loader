@@ -132,6 +132,12 @@ class FileRepository:
         file_row.updated_at = _utcnow()
         await self._session.flush()
 
+    async def mark_corrupted(self, file_row: File, reason: str) -> None:
+        file_row.status = FileStatus.CORRUPTED.value
+        file_row.last_error = reason[:4000]
+        file_row.updated_at = _utcnow()
+        await self._session.flush()
+
     async def reset_stale_processing(self, *, older_than_seconds: int) -> int:
         threshold = _utcnow() - timedelta(seconds=older_than_seconds)
         stmt = (

@@ -57,6 +57,47 @@ class Settings(BaseSettings):
 
     max_upload_attempts: int = Field(default=5, validation_alias="MAX_UPLOAD_ATTEMPTS")
 
+    # Video integrity validation after upload
+    video_validation_enabled: bool = Field(default=True, validation_alias="VIDEO_VALIDATION_ENABLED")
+    video_min_size_bytes: int = Field(
+        default=5 * 1024 * 1024,
+        validation_alias="VIDEO_MIN_SIZE_BYTES",
+        description="Files smaller than this are immediately marked CORRUPTED (default 5 MB).",
+    )
+    video_min_duration_sec: float = Field(
+        default=5.0,
+        validation_alias="VIDEO_MIN_DURATION_SEC",
+        description="Videos shorter than this are marked CORRUPTED (default 5 s).",
+    )
+    video_ffprobe_timeout_sec: int = Field(
+        default=30,
+        validation_alias="VIDEO_FFPROBE_TIMEOUT_SEC",
+    )
+    video_frame_check_enabled: bool = Field(
+        default=True,
+        validation_alias="VIDEO_FRAME_CHECK_ENABLED",
+        description="Whether to extract a frame and check pixel variance.",
+    )
+    video_frame_seek_sec: float = Field(
+        default=2.0,
+        validation_alias="VIDEO_FRAME_SEEK_SEC",
+        description="Seek offset for frame extraction — avoids green HEVC frames at stream start.",
+    )
+    video_frame_timeout_sec: int = Field(
+        default=60,
+        validation_alias="VIDEO_FRAME_TIMEOUT_SEC",
+    )
+    video_frame_min_variance: float = Field(
+        default=8.0,
+        validation_alias="VIDEO_FRAME_MIN_VARIANCE",
+        description="Minimum pixel std-dev to accept a frame (green/gray frames ≈ 0–5).",
+    )
+    video_presign_expiry_sec: int = Field(
+        default=900,
+        validation_alias="VIDEO_PRESIGN_EXPIRY_SEC",
+        description="Presigned URL TTL for ffprobe/ffmpeg access (default 15 min).",
+    )
+
     @property
     def celery_broker(self) -> str:
         return self.celery_broker_url or self.redis_url
