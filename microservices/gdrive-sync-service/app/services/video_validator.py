@@ -3,8 +3,12 @@
 Flow:
     1. Size check (instant, no I/O).
     2. ffprobe on a presigned MinIO URL — verifies container/codec/duration.
-    3. ffmpeg frame extraction at seek offset — verifies the stream is decodable.
-    4. Pixel variance check — rejects green / gray / black frames.
+       Uses ``-f hevc`` fallback to bypass libgme 50 MB HTTP size limit.
+    3. Download first HEVC_PROBE_BYTES from MinIO → temp file for frame decode.
+       Raw HEVC over HTTP cannot be seeked efficiently, so we sample only the
+       beginning of the stream (≈10 MB ≈ 16 s at 5 Mbps camera bitrate).
+    4. ffmpeg frame extraction from the temp file at seek offset.
+    5. Pixel variance check — rejects green / gray / black frames.
 """
 from __future__ import annotations
 
@@ -13,13 +17,18 @@ import json
 import logging
 import statistics
 import subprocess
-from dataclasses import dataclass, field
+import tempfile
+from dataclasses import dataclass
 from datetime import timedelta
+from pathlib import Path
 
 from app.core.settings import Settings
 from app.services.minio_client import MinioObjectStore
 
 logger = logging.getLogger(__name__)
+
+# First N bytes downloaded for frame-extraction probing (10 MB ≈ 16s at 5 Mbps).
+HEVC_PROBE_BYTES = 10 * 1024 * 1024
 
 
 @dataclass
@@ -36,8 +45,8 @@ class VideoValidationResult:
 def _ffprobe(url: str, *, timeout: int, force_hevc: bool = False) -> dict:
     """Run ffprobe against an HTTP URL, return parsed JSON.
 
-    For raw .h265/.hevc streams we force ``-f hevc`` to bypass the libgme
-    demuxer which rejects HTTP files larger than its 50 MB default max_size.
+    Falls back to ``-f hevc`` to bypass the libgme demuxer that rejects HTTP
+    streams larger than 50 MB.
     """
     cmd = ["ffprobe", "-v", "quiet"]
     if force_hevc:
@@ -46,32 +55,43 @@ def _ffprobe(url: str, *, timeout: int, force_hevc: bool = False) -> dict:
     result = subprocess.run(cmd, capture_output=True, timeout=timeout)
     if result.returncode != 0:
         if not force_hevc:
-            # Retry with explicit hevc demuxer (avoids libgme max_size limit)
             return _ffprobe(url, timeout=timeout, force_hevc=True)
         stderr = result.stderr.decode(errors="replace")[:500]
         raise ValueError(f"ffprobe exit={result.returncode}: {stderr}")
-    return json.loads(result.stdout)
+    data = json.loads(result.stdout)
+    if not data.get("streams") and not force_hevc:
+        return _ffprobe(url, timeout=timeout, force_hevc=True)
+    return data
 
 
-def _extract_frame(url: str, *, seek_sec: float, timeout: int, force_hevc: bool = False) -> bytes:
-    """Extract one JPEG frame from *url* at *seek_sec* via ffmpeg.
+def _extract_frame_from_file(path: str, *, seek_sec: float, timeout: int) -> bytes:
+    """Extract one JPEG frame from a local raw-HEVC file.
 
-    ``force_hevc=True`` adds ``-f hevc`` before the input URL to bypass the
-    libgme demuxer which refuses HTTP streams larger than 50 MB.
+    We use ``-f hevc`` to tell ffmpeg the input format explicitly (avoids the
+    libgme format prober), and place ``-ss`` *after* ``-i`` so the seek is
+    performed by decoding (accurate for raw streams that lack seek tables).
     """
-    cmd = ["ffmpeg", "-v", "quiet", "-ss", f"{seek_sec:.3f}"]
-    if force_hevc:
-        cmd += ["-f", "hevc"]
-    cmd += ["-i", url, "-vframes", "1", "-f", "image2", "-vcodec", "mjpeg", "pipe:1"]
+    cmd = [
+        "ffmpeg", "-v", "quiet",
+        "-f", "hevc",   # input format hint — bypasses libgme probing
+        "-i", path,
+        "-ss", f"{seek_sec:.3f}",   # accurate (post-input) seek
+        "-vframes", "1", "-f", "image2", "-vcodec", "mjpeg", "pipe:1",
+    ]
     result = subprocess.run(cmd, capture_output=True, timeout=timeout)
     if result.returncode != 0 or len(result.stdout) < 100:
-        if not force_hevc:
-            # Retry with explicit hevc demuxer (avoids libgme max_size limit)
-            return _extract_frame(url, seek_sec=seek_sec, timeout=timeout, force_hevc=True)
-        stderr = result.stderr.decode(errors="replace")[:400]
-        raise ValueError(
-            f"ffmpeg frame exit={result.returncode} size={len(result.stdout)}: {stderr}"
-        )
+        # Fallback: extract first frame (no seek) for streams without keyframes at offset
+        cmd_fallback = [
+            "ffmpeg", "-v", "quiet",
+            "-f", "hevc", "-i", path,
+            "-vframes", "1", "-f", "image2", "-vcodec", "mjpeg", "pipe:1",
+        ]
+        result = subprocess.run(cmd_fallback, capture_output=True, timeout=timeout)
+        if result.returncode != 0 or len(result.stdout) < 100:
+            stderr = result.stderr.decode(errors="replace")[:400]
+            raise ValueError(
+                f"ffmpeg frame exit={result.returncode} size={len(result.stdout)}: {stderr}"
+            )
     return result.stdout
 
 
@@ -167,27 +187,51 @@ def validate_video(
         )
 
     # ── 4. Frame extraction ──────────────────────────────────────────────────
+    # Raw HEVC over HTTP cannot be seeked efficiently — ffmpeg would have to
+    # read the entire file sequentially.  Instead, download only the first
+    # HEVC_PROBE_BYTES from MinIO and extract a frame from the local copy.
     seek = settings.video_frame_seek_sec
-    # For very short videos clamp seek to avoid overshooting
     if duration_sec is not None and seek >= duration_sec:
         seek = max(0.0, duration_sec * 0.3)
 
     try:
-        frame_bytes = _extract_frame(url, seek_sec=seek, timeout=settings.video_frame_timeout_sec)
-    except ValueError as exc:
-        # One retry at seek=0 (some HEVC streams need decoder warm-up from start)
-        logger.debug("frame extraction at %.1fs failed, retrying at 0s: %s", seek, exc)
-        try:
-            frame_bytes = _extract_frame(url, seek_sec=0.0, timeout=settings.video_frame_timeout_sec)
-        except ValueError as exc2:
-            return VideoValidationResult(
-                ok=False,
-                reason=f"frame extraction failed: {exc2}",
-                duration_sec=duration_sec,
-                codec=codec,
-                width=width,
-                height=height,
+        with tempfile.NamedTemporaryFile(suffix=".hevc", delete=False) as tmp:
+            tmp_path = tmp.name
+            response = store._client.get_object(
+                store.bucket, object_name, length=HEVC_PROBE_BYTES
             )
+            try:
+                for chunk in response.stream(amt=65536):
+                    tmp.write(chunk)
+            finally:
+                response.close()
+                response.release_conn()
+    except Exception as exc:  # noqa: BLE001
+        Path(tmp_path).unlink(missing_ok=True)
+        return VideoValidationResult(
+            ok=False,
+            reason=f"MinIO partial download failed: {exc}",
+            duration_sec=duration_sec,
+            codec=codec,
+            width=width,
+            height=height,
+        )
+
+    try:
+        frame_bytes = _extract_frame_from_file(
+            tmp_path, seek_sec=seek, timeout=settings.video_frame_timeout_sec
+        )
+    except ValueError as exc:
+        return VideoValidationResult(
+            ok=False,
+            reason=f"frame extraction failed: {exc}",
+            duration_sec=duration_sec,
+            codec=codec,
+            width=width,
+            height=height,
+        )
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
 
     # ── 5. Pixel variance ────────────────────────────────────────────────────
     variance = _pixel_variance(frame_bytes)
