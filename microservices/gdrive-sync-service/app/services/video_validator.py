@@ -53,20 +53,21 @@ def _ffprobe(url: str, *, timeout: int, force_hevc: bool = False) -> dict:
     return json.loads(result.stdout)
 
 
-def _extract_frame(url: str, *, seek_sec: float, timeout: int) -> bytes:
-    """Extract one JPEG frame from *url* at *seek_sec* via ffmpeg."""
-    cmd = [
-        "ffmpeg",
-        "-v", "quiet",
-        "-ss", f"{seek_sec:.3f}",
-        "-i", url,
-        "-vframes", "1",
-        "-f", "image2",
-        "-vcodec", "mjpeg",
-        "pipe:1",
-    ]
+def _extract_frame(url: str, *, seek_sec: float, timeout: int, force_hevc: bool = False) -> bytes:
+    """Extract one JPEG frame from *url* at *seek_sec* via ffmpeg.
+
+    ``force_hevc=True`` adds ``-f hevc`` before the input URL to bypass the
+    libgme demuxer which refuses HTTP streams larger than 50 MB.
+    """
+    cmd = ["ffmpeg", "-v", "quiet", "-ss", f"{seek_sec:.3f}"]
+    if force_hevc:
+        cmd += ["-f", "hevc"]
+    cmd += ["-i", url, "-vframes", "1", "-f", "image2", "-vcodec", "mjpeg", "pipe:1"]
     result = subprocess.run(cmd, capture_output=True, timeout=timeout)
     if result.returncode != 0 or len(result.stdout) < 100:
+        if not force_hevc:
+            # Retry with explicit hevc demuxer (avoids libgme max_size limit)
+            return _extract_frame(url, seek_sec=seek_sec, timeout=timeout, force_hevc=True)
         stderr = result.stderr.decode(errors="replace")[:400]
         raise ValueError(
             f"ffmpeg frame exit={result.returncode} size={len(result.stdout)}: {stderr}"
