@@ -33,18 +33,21 @@ class VideoValidationResult:
     variance: float | None = None
 
 
-def _ffprobe(url: str, *, timeout: int) -> dict:
-    """Run ffprobe against an HTTP URL, return parsed JSON."""
-    cmd = [
-        "ffprobe",
-        "-v", "quiet",
-        "-print_format", "json",
-        "-show_streams",
-        "-show_format",
-        url,
-    ]
+def _ffprobe(url: str, *, timeout: int, force_hevc: bool = False) -> dict:
+    """Run ffprobe against an HTTP URL, return parsed JSON.
+
+    For raw .h265/.hevc streams we force ``-f hevc`` to bypass the libgme
+    demuxer which rejects HTTP files larger than its 50 MB default max_size.
+    """
+    cmd = ["ffprobe", "-v", "quiet"]
+    if force_hevc:
+        cmd += ["-f", "hevc"]
+    cmd += ["-print_format", "json", "-show_streams", "-show_format", url]
     result = subprocess.run(cmd, capture_output=True, timeout=timeout)
     if result.returncode != 0:
+        if not force_hevc:
+            # Retry with explicit hevc demuxer (avoids libgme max_size limit)
+            return _ffprobe(url, timeout=timeout, force_hevc=True)
         stderr = result.stderr.decode(errors="replace")[:500]
         raise ValueError(f"ffprobe exit={result.returncode}: {stderr}")
     return json.loads(result.stdout)
