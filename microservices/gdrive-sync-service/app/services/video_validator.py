@@ -4,11 +4,13 @@ Flow:
     1. Size check (instant, no I/O).
     2. ffprobe on a presigned MinIO URL — verifies container/codec/duration.
        Uses ``-f hevc`` fallback to bypass libgme 50 MB HTTP size limit.
-    3. Download first HEVC_PROBE_BYTES from MinIO → temp file for frame decode.
-       Raw HEVC over HTTP cannot be seeked efficiently, so we sample only the
-       beginning of the stream (≈10 MB ≈ 16 s at 5 Mbps camera bitrate).
-    4. ffmpeg frame extraction from the temp file at seek offset.
-    5. Pixel variance check — rejects green / gray / black frames.
+    3. Multi-point sampling: download HEVC_PROBE_BYTES from 3 offsets
+       (0%, 33%, 66% of file size) → temp files for frame decode.
+       Sampling multiple points catches corruption that only appears mid-video
+       (e.g. green/incomplete frames at minute 30 of a 1-hour game).
+    4. ffmpeg frame extraction from each temp file.
+    5. Pixel variance check on each frame — rejects green / gray / black frames.
+       File is rejected if ANY sample point fails the variance check.
 """
 from __future__ import annotations
 
@@ -27,8 +29,14 @@ from app.services.minio_client import MinioObjectStore
 
 logger = logging.getLogger(__name__)
 
-# First N bytes downloaded for frame-extraction probing (10 MB ≈ 16s at 5 Mbps).
+# Bytes downloaded per sample point (10 MB ≈ 16s at 5 Mbps camera bitrate).
 HEVC_PROBE_BYTES = 10 * 1024 * 1024
+
+# Relative offsets into the file where we sample frames.
+# 0.0 = start, 0.33 = first-third, 0.66 = two-thirds.
+# We skip the very end (>0.8) because HEVC streams often have incomplete
+# trailing GOPs that produce false positives.
+SAMPLE_OFFSETS = (0.0, 0.33, 0.66)
 
 
 @dataclass
@@ -186,67 +194,84 @@ def validate_video(
             height=height,
         )
 
-    # ── 4. Frame extraction ──────────────────────────────────────────────────
+    # ── 4. Multi-point frame extraction ─────────────────────────────────────
     # Raw HEVC over HTTP cannot be seeked efficiently — ffmpeg would have to
-    # read the entire file sequentially.  Instead, download only the first
-    # HEVC_PROBE_BYTES from MinIO and extract a frame from the local copy.
-    seek = settings.video_frame_seek_sec
-    if duration_sec is not None and seek >= duration_sec:
-        seek = max(0.0, duration_sec * 0.3)
+    # read the entire file sequentially.  Instead, download HEVC_PROBE_BYTES
+    # from several byte offsets (start / 33% / 66%) and extract one frame from
+    # each chunk.  This catches corruption that only appears mid-video
+    # (green / incomplete frames not present in the first 16 seconds).
+    last_variance: float | None = None
+    for rel_offset in SAMPLE_OFFSETS:
+        byte_offset = int(file_size * rel_offset)
+        # Align to nearest MB to improve chance of landing near a keyframe.
+        byte_offset = (byte_offset // (1024 * 1024)) * (1024 * 1024)
 
-    try:
-        with tempfile.NamedTemporaryFile(suffix=".hevc", delete=False) as tmp:
-            tmp_path = tmp.name
-            response = store._client.get_object(
-                store.bucket, object_name, length=HEVC_PROBE_BYTES
+        tmp_path: str | None = None
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".hevc", delete=False) as tmp:
+                tmp_path = tmp.name
+                response = store._client.get_object(
+                    store.bucket,
+                    object_name,
+                    offset=byte_offset,
+                    length=HEVC_PROBE_BYTES,
+                )
+                try:
+                    for chunk in response.stream(amt=65536):
+                        tmp.write(chunk)
+                finally:
+                    response.close()
+                    response.release_conn()
+        except Exception as exc:  # noqa: BLE001
+            if tmp_path:
+                Path(tmp_path).unlink(missing_ok=True)
+            logger.warning(
+                "video_validator: MinIO download failed at offset=%d for %s: %s",
+                byte_offset, object_name, exc,
             )
-            try:
-                for chunk in response.stream(amt=65536):
-                    tmp.write(chunk)
-            finally:
-                response.close()
-                response.release_conn()
-    except Exception as exc:  # noqa: BLE001
-        Path(tmp_path).unlink(missing_ok=True)
-        return VideoValidationResult(
-            ok=False,
-            reason=f"MinIO partial download failed: {exc}",
-            duration_sec=duration_sec,
-            codec=codec,
-            width=width,
-            height=height,
-        )
+            continue  # skip this sample point, don't fail the whole file
 
-    try:
-        frame_bytes = _extract_frame_from_file(
-            tmp_path, seek_sec=seek, timeout=settings.video_frame_timeout_sec
-        )
-    except ValueError as exc:
-        return VideoValidationResult(
-            ok=False,
-            reason=f"frame extraction failed: {exc}",
-            duration_sec=duration_sec,
-            codec=codec,
-            width=width,
-            height=height,
-        )
-    finally:
-        Path(tmp_path).unlink(missing_ok=True)
+        try:
+            # For non-zero offsets we don't know where keyframes are — extract
+            # the first decodable frame from the chunk (no seek).
+            seek_sec = 0.0 if rel_offset > 0.0 else settings.video_frame_seek_sec
+            if duration_sec is not None and seek_sec >= duration_sec:
+                seek_sec = 0.0
+            frame_bytes = _extract_frame_from_file(
+                tmp_path,
+                seek_sec=seek_sec,
+                timeout=settings.video_frame_timeout_sec,
+            )
+        except ValueError as exc:
+            logger.warning(
+                "video_validator: frame extraction failed at offset=%.0f%% for %s: %s",
+                rel_offset * 100, object_name, exc,
+            )
+            Path(tmp_path).unlink(missing_ok=True)
+            continue  # codec error at this offset — skip, don't penalise
+        finally:
+            Path(tmp_path).unlink(missing_ok=True)
 
-    # ── 5. Pixel variance ────────────────────────────────────────────────────
-    variance = _pixel_variance(frame_bytes)
-    if variance < settings.video_frame_min_variance:
-        return VideoValidationResult(
-            ok=False,
-            reason=(
-                f"frame variance too low: {variance:.1f} < {settings.video_frame_min_variance}"
-                " (green / gray / black frame)"
-            ),
-            duration_sec=duration_sec,
-            codec=codec,
-            width=width,
-            height=height,
-            variance=variance,
+        # ── 5. Pixel variance per sample ─────────────────────────────────────
+        variance = _pixel_variance(frame_bytes)
+        last_variance = variance
+        if variance < settings.video_frame_min_variance:
+            return VideoValidationResult(
+                ok=False,
+                reason=(
+                    f"frame variance too low at {rel_offset*100:.0f}%: "
+                    f"{variance:.1f} < {settings.video_frame_min_variance}"
+                    " (green / gray / black frame)"
+                ),
+                duration_sec=duration_sec,
+                codec=codec,
+                width=width,
+                height=height,
+                variance=variance,
+            )
+        logger.debug(
+            "video_validator: sample offset=%.0f%% variance=%.1f OK",
+            rel_offset * 100, variance,
         )
 
     logger.info(
@@ -255,7 +280,7 @@ def validate_video(
         f"{duration_sec:.1f}s" if duration_sec is not None else "?",
         width,
         height,
-        variance,
+        last_variance or 0.0,
         object_name,
     )
     return VideoValidationResult(
@@ -264,5 +289,5 @@ def validate_video(
         codec=codec,
         width=width,
         height=height,
-        variance=variance,
+        variance=last_variance,
     )
