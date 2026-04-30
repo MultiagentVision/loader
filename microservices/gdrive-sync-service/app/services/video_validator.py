@@ -33,10 +33,17 @@ logger = logging.getLogger(__name__)
 HEVC_PROBE_BYTES = 10 * 1024 * 1024
 
 # Relative offsets into the file where we sample frames.
-# 0.0 = start, 0.33 = first-third, 0.66 = two-thirds.
-# We skip the very end (>0.8) because HEVC streams often have incomplete
-# trailing GOPs that produce false positives.
-SAMPLE_OFFSETS = (0.0, 0.33, 0.66)
+# Each entry: (offset_fraction, min_variance_override | None).
+# min_variance_override=None → use settings.video_frame_min_variance.
+# 97% uses a lower threshold because HEVC trailing GOPs are sometimes
+# legitimately truncated/incomplete and produce low-variance frames even
+# on valid files — we only reject truly degenerate output there (near-zero).
+SAMPLE_OFFSETS: tuple[tuple[float, float | None], ...] = (
+    (0.00, None),   # start of video
+    (0.33, None),   # first third
+    (0.66, None),   # two thirds
+    (0.97, 2.0),    # near-end: lower threshold to tolerate incomplete GOPs
+)
 
 
 @dataclass
@@ -201,7 +208,7 @@ def validate_video(
     # each chunk.  This catches corruption that only appears mid-video
     # (green / incomplete frames not present in the first 16 seconds).
     last_variance: float | None = None
-    for rel_offset in SAMPLE_OFFSETS:
+    for rel_offset, variance_override in SAMPLE_OFFSETS:
         byte_offset = int(file_size * rel_offset)
         # Align to nearest MB to improve chance of landing near a keyframe.
         byte_offset = (byte_offset // (1024 * 1024)) * (1024 * 1024)
@@ -255,12 +262,13 @@ def validate_video(
         # ── 5. Pixel variance per sample ─────────────────────────────────────
         variance = _pixel_variance(frame_bytes)
         last_variance = variance
-        if variance < settings.video_frame_min_variance:
+        min_var = variance_override if variance_override is not None else settings.video_frame_min_variance
+        if variance < min_var:
             return VideoValidationResult(
                 ok=False,
                 reason=(
                     f"frame variance too low at {rel_offset*100:.0f}%: "
-                    f"{variance:.1f} < {settings.video_frame_min_variance}"
+                    f"{variance:.1f} < {min_var:.1f}"
                     " (green / gray / black frame)"
                 ),
                 duration_sec=duration_sec,
@@ -270,8 +278,8 @@ def validate_video(
                 variance=variance,
             )
         logger.debug(
-            "video_validator: sample offset=%.0f%% variance=%.1f OK",
-            rel_offset * 100, variance,
+            "video_validator: sample offset=%.0f%% variance=%.1f OK (min=%.1f)",
+            rel_offset * 100, variance, min_var,
         )
 
     logger.info(
