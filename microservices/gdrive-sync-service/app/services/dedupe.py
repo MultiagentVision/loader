@@ -9,11 +9,30 @@ def normalize_checksum(value: str | None) -> str | None:
     return value.strip().lower()
 
 
-def should_skip_from_db(row: File, *, incoming_checksum: str | None, canonical_path: str) -> bool:
+def should_skip_from_db(
+    row: File,
+    *,
+    incoming_checksum: str | None,
+    canonical_path: str,
+    object_exists: bool = True,
+    object_checksum: str | None = None,
+    object_checksum_checked: bool = False,
+    incoming_size: int | None = None,
+    object_size: int | None = None,
+) -> bool:
     if row.status != FileStatus.UPLOADED.value:
         return False
     if (row.minio_path or "") != canonical_path:
         return False
+    if not object_exists:
+        return False
+    if incoming_size is not None and object_size is not None and incoming_size != object_size:
+        return False
+    if object_checksum_checked and incoming_checksum is not None and object_checksum is None:
+        return False
+    if object_checksum is not None and incoming_checksum is not None:
+        if normalize_checksum(object_checksum) != normalize_checksum(incoming_checksum):
+            return False
     return normalize_checksum(row.checksum) == normalize_checksum(incoming_checksum)
 
 

@@ -21,6 +21,7 @@ def create_celery_app() -> Celery:
         result_serializer="json",
         timezone="UTC",
         enable_utc=True,
+        worker_prefetch_multiplier=1,
     )
     app.conf.task_routes = {
         "app.workers.tasks.sync_all_drives": {"queue": "sync"},

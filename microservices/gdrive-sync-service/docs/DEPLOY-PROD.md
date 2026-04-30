@@ -36,7 +36,16 @@ Apply ConfigMap and Deployments from `k8s/` (order: ExternalSecret → Secret sy
 
 In **chessverse-monorepo**, run the pipeline with **`SERVICE=gdrive_sync`** (after the Jenkinsfile in that repo lists this service). Image: `registry.multiagent.vision/chessverse/gdrive_sync:sha-<gitsha>`.
 
-Argo CD: add an Application (or extend your ApplicationSet) that applies `microservices/gdrive-sync-service/k8s/*.yaml` for namespace `chessverse`. Until that exists, the Jenkins **Verify** stage for `gdrive_sync` is skipped so the build can still push images.
+## Argo CD (пошагово)
+
+**Почему не видно в Argo:** Jenkins только собрал образ `registry.multiagent.vision/chessverse/gdrive_sync:sha-…`. В Argo появляется только то, для чего создан **`Application`**.
+
+1. Подготовьте секреты (`gdrive-sync-env`, `gdrive-sync-drive-sa`, MinIO ExternalSecret) — см. выше.
+2. В UI Argo ищите приложение с именем вроде **`chessverse-gdrive-sync`**, не `gdrive_sync` (это имя в Jenkins).
+3. **New App:** repo `https://github.com/MultiagentVision/chessverse-monorepo.git`, revision `main`, path **`microservices/gdrive-sync-service/k8s`**, namespace **`chessverse`**. Образец YAML: **`docs/argo-cd-application.sample.yaml`** (не хранить его внутри `k8s/`).
+4. **Sync** / дождаться авто-синка. Образ подтянется из `deployments.yaml` на ветке `main` (после коммита Jenkins с metadata).
+
+Пока Application не создан, стадия Jenkins **Verify** для `gdrive_sync` пропускается.
 
 ## Smoke test
 

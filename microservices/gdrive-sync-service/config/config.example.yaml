@@ -5,6 +5,16 @@ drives:
     # Keys in MinIO: ``video/Rehovot/<driveFileId>_<filename>`` (bucket from MINIO_BUCKET, e.g. chess-ai).
     object_prefix: video/Rehovot
 
+  - name: beer-sheva
+    folder_id: "1PE-xIIcoy7sh-57tHn7qSpw30umH23w7"
+    credentials_path: /secrets/beer-sheva-drive-sa.json
+    object_prefix: "video/Beer Sheva"
+
+  - name: ramat-gan
+    folder_id: "1cuTsPEkxWp5eTQbyI5xHf6GHRmTvwbRh"
+    credentials_path: /secrets/ramat-gan-drive-sa.json
+    object_prefix: "video/Ramat Gan"
+
   # - name: team2
   #   folder_id: "REPLACE_ME"
   #   credentials_path: /secrets/team2-sa.json

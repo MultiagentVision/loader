@@ -43,7 +43,19 @@ services:
 
   gdrive-sync-worker:
     build: .
-    command: ["celery", "-A", "app.workers.celery_app", "worker", "-Q", "sync,upload", "-l", "info"]
+    command:
+      [
+        "celery",
+        "-A",
+        "app.workers.celery_app",
+        "worker",
+        "-Q",
+        "sync,upload",
+        "-l",
+        "info",
+        "-c",
+        "8",
+      ]
     env_file:
       - .env
     depends_on:

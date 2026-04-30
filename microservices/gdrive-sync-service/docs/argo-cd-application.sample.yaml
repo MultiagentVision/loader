@@ -1,4 +1,5 @@
-# Example only — adjust repo URL, targetRevision, and path to match your GitOps layout.
+# Скопируйте в gitops-репозиторий или: kubectl apply -f thisfile.yaml
+# Не кладите в microservices/gdrive-sync-service/k8s/ — Argo синхронизирует весь каталог k8s/.
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:

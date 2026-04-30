@@ -96,13 +96,23 @@ async def run_upload_for_file(
                     object_prefix=drive_cfg.object_prefix,
                 )
 
-                if should_skip_from_db(row, incoming_checksum=incoming_checksum, canonical_path=canonical_path):
+                stat = await asyncio.to_thread(store.stat_object, canonical_path)
+                object_checksum = extract_minio_checksum(dict(stat.metadata or {})) if stat is not None else None
+
+                if should_skip_from_db(
+                    row,
+                    incoming_checksum=incoming_checksum,
+                    canonical_path=canonical_path,
+                    object_exists=stat is not None,
+                    object_checksum=object_checksum,
+                    object_checksum_checked=stat is not None,
+                    incoming_size=size,
+                    object_size=stat.size if stat is not None else None,
+                ):
                     logger.info("SKIP (DB): drive=%s file_id=%s name=%s", drive_name, file_id, file_name)
                     return
 
-                stat = await asyncio.to_thread(store.stat_object, canonical_path)
                 if stat is not None:
-                    object_checksum = extract_minio_checksum(dict(stat.metadata or {}))
                     if should_skip_from_minio(
                         object_checksum=object_checksum, incoming_checksum=incoming_checksum
                     ):
@@ -239,6 +249,7 @@ async def run_sync_for_drive(
                         file_name=file_name,
                         checksum=checksum,
                         size=size,
+                        object_prefix=drive_cfg.object_prefix,
                     )
                     row = await repo.get_by_drive_file(drive_cfg.name, file_id)
                     if (

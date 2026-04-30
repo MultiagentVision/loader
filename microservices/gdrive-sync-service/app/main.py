@@ -4,6 +4,8 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from app.api.audit_route import router as audit_router
+from app.api.diagnostics_route import router as diagnostics_router
 from app.api.files_route import router as files_router
 from app.api.health import router as health_router
 from app.api.sync_route import router as sync_router
@@ -27,3 +29,5 @@ app = FastAPI(title="gdrive-sync-service", lifespan=lifespan)
 app.include_router(health_router)
 app.include_router(sync_router)
 app.include_router(files_router)
+app.include_router(audit_router)
+app.include_router(diagnostics_router)

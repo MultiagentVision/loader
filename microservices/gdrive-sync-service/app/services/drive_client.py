@@ -76,9 +76,10 @@ class GoogleDriveClient:
             .execute()
         )
 
-    def open_media_stream(self, file_id: str):
+    def open_media_stream(self, file_id: str, range_header: str | None = None):
         """Return a streaming ``requests.Response`` (caller must close)."""
         url = f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media&supportsAllDrives=true"
-        resp = self._http.get(url, stream=True)
+        headers = {"Range": range_header} if range_header else None
+        resp = self._http.get(url, stream=True, headers=headers)
         resp.raise_for_status()
         return resp

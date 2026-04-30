@@ -21,6 +21,6 @@ data:
         credentials_path: /secrets/beer-sheva-drive-sa.json
         object_prefix: "video/Beer Sheva"
       - name: ramat-gan
-        folder_id: "1aDfFcoxZZLpZbmWi98fltRbHJ1VFram9"
+        folder_id: "1cuTsPEkxWp5eTQbyI5xHf6GHRmTvwbRh"
         credentials_path: /secrets/ramat-gan-drive-sa.json
         object_prefix: "video/Ramat Gan"

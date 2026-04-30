@@ -25,8 +25,14 @@ class FileRepository:
         file_name: str,
         checksum: str | None,
         size: int,
+        object_prefix: str | None = None,
     ) -> None:
-        minio_path = build_object_key(drive_name, file_id, file_name)
+        minio_path = build_object_key(
+            drive_name,
+            file_id,
+            file_name,
+            object_prefix=object_prefix,
+        )
         now = _utcnow()
         stmt = (
             insert(File)
@@ -61,6 +67,14 @@ class FileRepository:
             select(File).where(File.drive_name == drive_name, File.file_id == file_id)
         )
         return res.scalar_one_or_none()
+
+    async def find_by_drive_name_and_file_name(self, drive_name: str, file_name: str) -> list[File]:
+        res = await self._session.execute(
+            select(File)
+            .where(File.drive_name == drive_name, File.file_name == file_name)
+            .order_by(File.updated_at.desc(), File.id.desc())
+        )
+        return list(res.scalars().all())
 
     async def claim_next_upload_row(
         self,
@@ -161,3 +175,10 @@ class FileRepository:
     async def count_files(self) -> int:
         res = await self._session.execute(select(func.count()).select_from(File))
         return int(res.scalar_one())
+
+    async def list_all_by_drive(self, drive_name: str) -> list[File]:
+        """Return all file rows for *drive_name* — used by the quality audit."""
+        res = await self._session.execute(
+            select(File).where(File.drive_name == drive_name)
+        )
+        return list(res.scalars().all())

@@ -71,6 +71,14 @@ spec:
               mountPath: /secrets/rehovot-drive-sa.json
               subPath: rehovot-drive-sa.json
               readOnly: true
+            - name: drive-sa
+              mountPath: /secrets/beer-sheva-drive-sa.json
+              subPath: beer-sheva-drive-sa.json
+              readOnly: true
+            - name: drive-sa
+              mountPath: /secrets/ramat-gan-drive-sa.json
+              subPath: ramat-gan-drive-sa.json
+              readOnly: true
           readinessProbe:
             httpGet:
               path: /health
@@ -133,6 +141,8 @@ spec:
             - sync,upload
             - -l
             - info
+            - -c
+            - "8"
           env:
             - name: DRIVES_CONFIG_PATH
               value: /config/drives.yaml
@@ -153,12 +163,20 @@ spec:
               mountPath: /secrets/rehovot-drive-sa.json
               subPath: rehovot-drive-sa.json
               readOnly: true
+            - name: drive-sa
+              mountPath: /secrets/beer-sheva-drive-sa.json
+              subPath: beer-sheva-drive-sa.json
+              readOnly: true
+            - name: drive-sa
+              mountPath: /secrets/ramat-gan-drive-sa.json
+              subPath: ramat-gan-drive-sa.json
+              readOnly: true
           resources:
             requests:
-              memory: "512Mi"
-              cpu: "200m"
+              memory: "768Mi"
+              cpu: "250m"
             limits:
-              memory: "2Gi"
+              memory: "3Gi"
               cpu: "2000m"
 ---
 apiVersion: apps/v1
