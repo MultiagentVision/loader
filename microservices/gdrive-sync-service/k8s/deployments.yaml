@@ -212,6 +212,7 @@ spec:
             - beat
             - -l
             - info
+            - --schedule=/tmp/celerybeat-schedule
           env:
             - name: DRIVES_CONFIG_PATH
               value: /config/drives.yaml
