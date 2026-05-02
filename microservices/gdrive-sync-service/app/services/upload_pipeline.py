@@ -132,7 +132,19 @@ async def run_upload_for_file(
                     return
 
                 if stat is not None:
-                    if should_skip_from_minio(
+                    minio_size = stat.size or 0
+                    if minio_size != size:
+                        # MinIO object exists but is the wrong size (truncated/partial upload).
+                        # Always re-download and overwrite even if the stored checksum matches —
+                        # the checksum in MinIO metadata was written from GDrive metadata, not
+                        # computed from the bytes actually stored, so it cannot be trusted.
+                        logger.warning(
+                            "MinIO size mismatch (%d != expected %d) for drive=%s file_id=%s"
+                            " — forcing re-upload",
+                            minio_size, size, drive_name, file_id,
+                        )
+                        # Fall through to _transfer (overwrite the truncated object).
+                    elif should_skip_from_minio(
                         object_checksum=object_checksum, incoming_checksum=incoming_checksum
                     ):
                         if row.status != FileStatus.UPLOADED.value:
@@ -198,20 +210,22 @@ async def run_upload_for_file(
                 resp = drive.open_media_stream(file_id)
                 try:
                     raw = resp.raw
-                    if size >= settings.multipart_threshold_bytes:
-                        store.put_object_multipart_stream(
-                            canonical_path,
-                            raw,
-                            part_size=settings.multipart_part_size,
-                            metadata=metadata,
+                    cl_header = resp.headers.get("Content-Length")
+                    if cl_header and int(cl_header) != size:
+                        logger.warning(
+                            "GDrive Content-Length %s differs from metadata size %d "
+                            "for drive=%s file_id=%s — using response header",
+                            cl_header,
+                            size,
+                            drive_name,
+                            file_id,
                         )
-                    else:
-                        store.put_object_stream(
-                            canonical_path,
-                            raw,
-                            length=size,
-                            metadata=metadata,
-                        )
+                    store.put_object_multipart_stream(
+                        canonical_path,
+                        raw,
+                        part_size=settings.multipart_part_size,
+                        metadata=metadata,
+                    )
                 finally:
                     resp.close()
 
@@ -225,6 +239,29 @@ async def run_upload_for_file(
                     if row2 is not None:
                         await repo.mark_failed(row2, str(exc))
                 raise
+
+            # Verify the uploaded object has the expected size.
+            # GDrive streams can be silently truncated if the HTTP connection
+            # drops mid-transfer.  MinIO with length=-1 does not detect this and
+            # "succeeds" with fewer bytes.  A size mismatch here causes an
+            # immediate retry (up to max_retries) so the file is re-downloaded.
+            stat_after = await asyncio.to_thread(store.stat_object, canonical_path)
+            actual_size = stat_after.size if stat_after is not None else 0
+            if actual_size != size:
+                err_msg = (
+                    f"upload truncated: MinIO={actual_size:,} != GDrive={size:,} "
+                    f"(lost {size - actual_size:,} bytes)"
+                )
+                logger.error(
+                    "upload size mismatch drive=%s file_id=%s %s",
+                    drive_name, file_id, err_msg,
+                )
+                async with session.begin():
+                    repo = FileRepository(session)
+                    row2 = await repo.lock_file_row(drive_name, file_id)
+                    if row2 is not None:
+                        await repo.mark_failed(row2, err_msg)
+                raise RuntimeError(err_msg)
 
             async with session.begin():
                 repo = FileRepository(session)
