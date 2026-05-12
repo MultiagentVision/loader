@@ -81,20 +81,50 @@ async def run_upload_for_file(
                 if row.status == FileStatus.CORRUPTED.value:
                     meta_check = await asyncio.to_thread(drive.get_file_metadata, file_id)
                     if not checksum_changed_on_drive(row, incoming_checksum=meta_check.get("md5Checksum")):
-                        logger.info(
-                            "SKIP (CORRUPTED, unchanged): drive=%s file_id=%s",
+                        # Even if the GDrive file hasn't changed, check whether the MinIO
+                        # object has the correct size.  A previous upload may have been
+                        # truncated (connection drop) and the validator then marked the
+                        # file CORRUPTED.  Without this size check the file would remain
+                        # permanently stuck: CORRUPTED + unchanged checksum → skip forever.
+                        canonical_path_check = build_object_key(
+                            drive_name,
+                            file_id,
+                            meta_check.get("name") or row.file_name,
+                            object_prefix=drive_cfg.object_prefix,
+                        )
+                        stat_check = await asyncio.to_thread(store.stat_object, canonical_path_check)
+                        gdrive_size = int(meta_check.get("size") or row.size or 0)
+                        minio_size_check = stat_check.size if stat_check is not None else 0
+                        if stat_check is not None and gdrive_size > 0 and minio_size_check == gdrive_size:
+                            logger.info(
+                                "SKIP (CORRUPTED, unchanged, MinIO size OK %d): drive=%s file_id=%s",
+                                minio_size_check,
+                                drive_name,
+                                file_id,
+                            )
+                            return
+                        logger.warning(
+                            "CORRUPTED file has MinIO size mismatch (%d != %d) — forcing re-upload: "
+                            "drive=%s file_id=%s",
+                            minio_size_check,
+                            gdrive_size,
                             drive_name,
                             file_id,
                         )
-                        return
-                    logger.info(
-                        "CORRUPTED file changed on Drive, re-queuing: drive=%s file_id=%s",
-                        drive_name,
-                        file_id,
-                    )
-                    row.status = FileStatus.NEW.value
-                    row.updated_at = _utcnow()
-                    await session.flush()
+                        row.status = FileStatus.NEW.value
+                        row.attempt_count = 0
+                        row.last_error = None
+                        row.updated_at = _utcnow()
+                        await session.flush()
+                    else:
+                        logger.info(
+                            "CORRUPTED file changed on Drive, re-queuing: drive=%s file_id=%s",
+                            drive_name,
+                            file_id,
+                        )
+                        row.status = FileStatus.NEW.value
+                        row.updated_at = _utcnow()
+                        await session.flush()
 
                 meta = await asyncio.to_thread(drive.get_file_metadata, file_id)
                 mime = meta.get("mimeType") or ""
@@ -185,12 +215,22 @@ async def run_upload_for_file(
                     )
 
                 if row.attempt_count >= settings.max_upload_attempts:
-                    logger.error(
-                        "max attempts exceeded drive=%s file_id=%s attempts=%s",
-                        drive_name,
-                        file_id,
-                        row.attempt_count,
-                    )
+                    _INCOMPLETE_MARKERS = ("incomplete_upload:", "download incomplete:", "upload truncated:", "Range ")
+                    if row.last_error and any(m in row.last_error for m in _INCOMPLETE_MARKERS):
+                        logger.warning(
+                            "max attempts with incomplete uploads — marking CORRUPTED "
+                            "drive=%s file_id=%s attempts=%s",
+                            drive_name, file_id, row.attempt_count,
+                        )
+                        await repo.mark_corrupted(
+                            row,
+                            f"max retries exceeded with incomplete uploads: {row.last_error[:200]}",
+                        )
+                    else:
+                        logger.error(
+                            "max attempts exceeded drive=%s file_id=%s attempts=%s",
+                            drive_name, file_id, row.attempt_count,
+                        )
                     return
 
                 row.status = FileStatus.PROCESSING.value
@@ -247,20 +287,28 @@ async def run_upload_for_file(
             # immediate retry (up to max_retries) so the file is re-downloaded.
             stat_after = await asyncio.to_thread(store.stat_object, canonical_path)
             actual_size = stat_after.size if stat_after is not None else 0
+            completeness = (actual_size / size) if size > 0 else None
             if actual_size != size:
                 err_msg = (
                     f"upload truncated: MinIO={actual_size:,} != GDrive={size:,} "
-                    f"(lost {size - actual_size:,} bytes)"
+                    f"(completeness={completeness:.4f})"
                 )
                 logger.error(
                     "upload size mismatch drive=%s file_id=%s %s",
                     drive_name, file_id, err_msg,
                 )
+                await asyncio.to_thread(store.delete_object, canonical_path)
                 async with session.begin():
                     repo = FileRepository(session)
                     row2 = await repo.lock_file_row(drive_name, file_id)
                     if row2 is not None:
-                        await repo.mark_failed(row2, err_msg)
+                        await repo.mark_failed(
+                            row2,
+                            err_msg,
+                            gdrive_content_length=size,
+                            minio_stored_size=actual_size,
+                            size_completeness=completeness,
+                        )
                 raise RuntimeError(err_msg)
 
             async with session.begin():
@@ -273,6 +321,9 @@ async def run_upload_for_file(
                     checksum=incoming_checksum,
                     size=size,
                     minio_path=canonical_path,
+                    gdrive_content_length=size,
+                    minio_stored_size=actual_size,
+                    size_completeness=completeness,
                 )
             logger.info("UPLOADED drive=%s file_id=%s key=%s", drive_name, file_id, canonical_path)
 
